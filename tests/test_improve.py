@@ -4,8 +4,8 @@ Tests for the self-improvement loop (memory/improve.py).
 Split into two tiers:
 
   Unit tests (no mark):  Pure-Python logic that works with no API key and no graph.
-                         Tests _auto_score, _load_interactions, and record_outcome
-                         when no prior recall interactions exist.
+                         Tests _score_answer_vs_outcome, _load_interactions, and
+                         record_outcome when no prior recall interactions exist.
 
   Integration tests:     Full cycle requiring a populated graph + working LLM key.
                          Skip in CI with: pytest -m "not integration"
@@ -28,51 +28,52 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+from memory.improve import _score_answer_vs_outcome, _load_interactions, record_outcome
 
-from memory.improve import _auto_score, _load_interactions, record_outcome
 
+# ── unit tests: _score_answer_vs_outcome ──────────────────────────────────────
 
-# ── unit tests: _auto_score ───────────────────────────────────────────────────
-
-class TestAutoScore:
-    def test_empty_preview_returns_neutral(self):
-        score, reason = _auto_score("YES", "")
+class TestScoreAnswerVsOutcome:
+    def test_empty_answer_returns_neutral(self):
+        score, reason = _score_answer_vs_outcome("", "YES")
         assert score == 3
-        assert "empty" in reason or "no answer" in reason
+        assert "no answer" in reason or "empty" in reason
 
     def test_yes_outcome_with_yes_signal(self):
-        score, reason = _auto_score("YES", "The Fed will likely cut rates by 25bp")
+        score, reason = _score_answer_vs_outcome("The Fed will likely cut rates by 25bp", "YES")
         assert score == 5
         assert "YES" in reason or "yes" in reason.lower()
 
     def test_yes_outcome_with_no_signal(self):
-        score, reason = _auto_score("YES", "The Fed is likely to hold and pause")
+        score, reason = _score_answer_vs_outcome("The Fed is likely to hold and pause", "YES")
         assert score == 1
         assert "YES" in reason or "outcome YES" in reason
 
     def test_no_outcome_with_no_signal(self):
-        score, reason = _auto_score("NO", "likely to hold, pause unlikely to cut")
+        score, reason = _score_answer_vs_outcome("likely to hold, pause unlikely to cut", "NO")
         assert score == 5
 
     def test_no_outcome_with_yes_signal(self):
-        score, reason = _auto_score("NO", "likely will cut rates, positive outlook")
+        score, reason = _score_answer_vs_outcome("likely will cut rates, positive outlook", "NO")
         assert score == 1
         assert "outcome NO" in reason
 
-    def test_ambiguous_preview_neutral(self):
-        score, reason = _auto_score("YES", "the market might hold or cut")
+    def test_ambiguous_answer_neutral(self):
+        score, reason = _score_answer_vs_outcome("the market might hold or cut", "YES")
         assert score == 3
 
     def test_pending_outcome_is_neutral(self):
-        score, reason = _auto_score("pending", "anything")
+        score, reason = _score_answer_vs_outcome("anything", "pending")
         assert score == 3
         assert "not resolved" in reason or "pending" in reason
 
     def test_score_is_in_range(self):
         for outcome in ("YES", "NO", "pending"):
-            for preview in ("", "cut likely", "hold pause", "might or might not"):
-                score, _ = _auto_score(outcome, preview)
-                assert 1 <= score <= 5, f"score={score} out of range for ({outcome}, {preview!r})"
+            for answer in ("", "cut likely", "hold pause", "might or might not"):
+                score, _ = _score_answer_vs_outcome(answer, outcome)
+                assert 1 <= score <= 5, (
+                    f"score={score} out of range for (answer={answer!r}, outcome={outcome})"
+                )
 
 
 # ── unit tests: _load_interactions ────────────────────────────────────────────
@@ -130,42 +131,53 @@ class TestRecordOutcomeNoInteractions:
             "memory.improve._FEEDBACK_LOG",
             tmp_path / "log.jsonl",
         )
-        # Should complete without exception even when all events have no interactions
         from memory.improve import batch_record_outcomes
-        # Patch DATA_FILE to a single minimal event
         minimal = [{"market_id": "FM-TEST", "outcome": "YES", "category": "macro"}]
         fake_data = tmp_path / "events.json"
         fake_data.write_text(json.dumps(minimal))
         monkeypatch.setattr("memory.improve.DATA_FILE", fake_data)
-        # Should not raise
         await batch_record_outcomes()
 
 
 # ── unit tests: record_outcome with mocked session manager ───────────────────
 
 class TestRecordOutcomeMocked:
+    def _make_mock_sm(self, add_feedback_returns: bool = True) -> MagicMock:
+        """Build a SessionManager mock with both add_feedback and get_session as AsyncMocks."""
+        mock_sm = MagicMock()
+        mock_sm.add_feedback = AsyncMock(return_value=add_feedback_returns)
+        # get_session returns empty list → _fetch_original_entry returns None → fallback used
+        mock_sm.get_session = AsyncMock(return_value=[])
+        return mock_sm
+
+    def _make_interactions(self, tmp_path: Path, market_id: str, qa_id: str,
+                           answer_preview: str = "") -> Path:
+        f = tmp_path / "interactions.json"
+        f.write_text(json.dumps({
+            market_id: [{
+                "qa_id": qa_id,
+                "session_id": "loom_live",
+                "answer_preview": answer_preview,
+            }]
+        }))
+        return f
+
     @pytest.mark.asyncio
     async def test_add_feedback_true_is_reported_correctly(self, tmp_path, monkeypatch):
         """When add_feedback returns True, result shows add_feedback_returned=True."""
-        interactions = {
-            "FM-001": [{
-                "qa_id": "fake-qa-id-0001",
-                "session_id": "loom_live",
-                "answer_preview": "the fed will likely cut rates",
-            }]
-        }
-        f = tmp_path / "interactions.json"
-        f.write_text(json.dumps(interactions))
+        f = self._make_interactions(tmp_path, "FM-001", "fake-qa-id-0001",
+                                    "the fed will likely cut rates")
         monkeypatch.setattr("memory.improve._INTERACTIONS_FILE", f)
         monkeypatch.setattr("memory.improve._FEEDBACK_LOG", tmp_path / "log.jsonl")
 
         mock_user = MagicMock()
         mock_user.id = "test-user-id"
-        mock_sm = MagicMock()
-        mock_sm.add_feedback = AsyncMock(return_value=True)
+        mock_sm = self._make_mock_sm(add_feedback_returns=True)
 
-        with patch("memory.improve.get_session_manager" if False else "cognee.infrastructure.session.get_session_manager.get_session_manager", return_value=mock_sm):
-            with patch("cognee.modules.users.methods.get_default_user", new=AsyncMock(return_value=mock_user)):
+        with patch("cognee.infrastructure.session.get_session_manager.get_session_manager",
+                   return_value=mock_sm):
+            with patch("cognee.modules.users.methods.get_default_user",
+                       new=AsyncMock(return_value=mock_user)):
                 result = await record_outcome("FM-001", "YES")
 
         assert result["qa_ids_found"] == 1
@@ -176,27 +188,42 @@ class TestRecordOutcomeMocked:
         assert isinstance(fb["add_feedback_returned"], bool)
 
     @pytest.mark.asyncio
-    async def test_manual_score_override_respected(self, tmp_path, monkeypatch):
-        """Passing feedback_score=5 bypasses auto-scoring."""
-        interactions = {
-            "FM-002": [{
-                "qa_id": "fake-qa-id-0002",
-                "session_id": "loom_live",
-                "answer_preview": "hold pause",  # would auto-score to 1 for YES
-            }]
-        }
-        f = tmp_path / "interactions.json"
-        f.write_text(json.dumps(interactions))
+    async def test_add_feedback_false_is_reported_correctly(self, tmp_path, monkeypatch):
+        """When add_feedback returns False (qa_id not in cache), result shows False."""
+        f = self._make_interactions(tmp_path, "FM-010", "stale-qa-id",
+                                    "the market might hold")
         monkeypatch.setattr("memory.improve._INTERACTIONS_FILE", f)
         monkeypatch.setattr("memory.improve._FEEDBACK_LOG", tmp_path / "log.jsonl")
 
         mock_user = MagicMock()
         mock_user.id = "test-user-id"
-        mock_sm = MagicMock()
-        mock_sm.add_feedback = AsyncMock(return_value=True)
+        mock_sm = self._make_mock_sm(add_feedback_returns=False)
 
-        with patch("cognee.modules.users.methods.get_default_user", new=AsyncMock(return_value=mock_user)):
-            with patch("cognee.infrastructure.session.get_session_manager.get_session_manager", return_value=mock_sm):
+        with patch("cognee.infrastructure.session.get_session_manager.get_session_manager",
+                   return_value=mock_sm):
+            with patch("cognee.modules.users.methods.get_default_user",
+                       new=AsyncMock(return_value=mock_user)):
+                result = await record_outcome("FM-010", "YES")
+
+        fb = result["feedback_results"][0]
+        assert fb["add_feedback_returned"] is False
+
+    @pytest.mark.asyncio
+    async def test_manual_score_override_respected(self, tmp_path, monkeypatch):
+        """Passing feedback_score=5 bypasses auto-scoring."""
+        f = self._make_interactions(tmp_path, "FM-002", "fake-qa-id-0002",
+                                    "hold pause")  # would auto-score to 1 for YES
+        monkeypatch.setattr("memory.improve._INTERACTIONS_FILE", f)
+        monkeypatch.setattr("memory.improve._FEEDBACK_LOG", tmp_path / "log.jsonl")
+
+        mock_user = MagicMock()
+        mock_user.id = "test-user-id"
+        mock_sm = self._make_mock_sm()
+
+        with patch("cognee.infrastructure.session.get_session_manager.get_session_manager",
+                   return_value=mock_sm):
+            with patch("cognee.modules.users.methods.get_default_user",
+                       new=AsyncMock(return_value=mock_user)):
                 result = await record_outcome("FM-002", "YES", feedback_score=5)
 
         fb = result["feedback_results"][0]
@@ -205,26 +232,19 @@ class TestRecordOutcomeMocked:
     @pytest.mark.asyncio
     async def test_feedback_log_is_written(self, tmp_path, monkeypatch):
         """Each add_feedback call writes a line to feedback_log.jsonl."""
-        interactions = {
-            "FM-003": [{
-                "qa_id": "fake-qa-id-0003",
-                "session_id": "loom_live",
-                "answer_preview": "",
-            }]
-        }
-        f = tmp_path / "interactions.json"
-        f.write_text(json.dumps(interactions))
+        f = self._make_interactions(tmp_path, "FM-003", "fake-qa-id-0003", "")
         log_file = tmp_path / "log.jsonl"
         monkeypatch.setattr("memory.improve._INTERACTIONS_FILE", f)
         monkeypatch.setattr("memory.improve._FEEDBACK_LOG", log_file)
 
         mock_user = MagicMock()
         mock_user.id = "test-user-id"
-        mock_sm = MagicMock()
-        mock_sm.add_feedback = AsyncMock(return_value=False)
+        mock_sm = self._make_mock_sm(add_feedback_returns=False)
 
-        with patch("cognee.modules.users.methods.get_default_user", new=AsyncMock(return_value=mock_user)):
-            with patch("cognee.infrastructure.session.get_session_manager.get_session_manager", return_value=mock_sm):
+        with patch("cognee.infrastructure.session.get_session_manager.get_session_manager",
+                   return_value=mock_sm):
+            with patch("cognee.modules.users.methods.get_default_user",
+                       new=AsyncMock(return_value=mock_user)):
                 await record_outcome("FM-003", "NO")
 
         assert log_file.exists(), "feedback_log.jsonl was not created"
@@ -237,6 +257,27 @@ class TestRecordOutcomeMocked:
         assert "score" in entry
         assert "add_feedback_returned" in entry
         assert "timestamp" in entry
+
+    @pytest.mark.asyncio
+    async def test_get_session_called_for_original_answer(self, tmp_path, monkeypatch):
+        """record_outcome calls get_session() to retrieve the full original answer."""
+        f = self._make_interactions(tmp_path, "FM-004", "qa-id-with-session-entry",
+                                    "preview text")
+        monkeypatch.setattr("memory.improve._INTERACTIONS_FILE", f)
+        monkeypatch.setattr("memory.improve._FEEDBACK_LOG", tmp_path / "log.jsonl")
+
+        mock_user = MagicMock()
+        mock_user.id = "test-user-id"
+        mock_sm = self._make_mock_sm()
+
+        with patch("cognee.infrastructure.session.get_session_manager.get_session_manager",
+                   return_value=mock_sm):
+            with patch("cognee.modules.users.methods.get_default_user",
+                       new=AsyncMock(return_value=mock_user)):
+                await record_outcome("FM-004", "YES")
+
+        # get_session was called as part of _fetch_original_entry()
+        mock_sm.get_session.assert_called_once()
 
 
 # ── integration tests: full cycle ─────────────────────────────────────────────
@@ -266,7 +307,6 @@ class TestImproveIntegration:
         events = json.loads(DATA_FILE.read_text())
         fm001 = next(e for e in events if e["market_id"] == "FM-001")
 
-        # Sanity check: graph must have data
         try:
             chunks = await cognee.search("Federal Reserve", query_type=SearchType.CHUNKS, top_k=1)
         except Exception as exc:
@@ -274,7 +314,7 @@ class TestImproveIntegration:
         if not chunks:
             pytest.skip("Graph is empty — run: python -m ingest.loader --source fixtures")
 
-        # Step 1: recall
+        # Step 1: recall — saves qa_id to data/recall_interactions.json
         recall_result = await find_analogous_events(fm001)
         qa_id = recall_result.get("qa_id")
         assert qa_id is not None, (
@@ -282,47 +322,45 @@ class TestImproveIntegration:
             "Check that _save_qa_interaction() completed successfully."
         )
         print(f"\n[recall] qa_id={qa_id}")
-        print(f"[recall] graph_completion snippet: {str(recall_result.get('graph_completion', ''))[:200]}")
+        print(f"[recall] graph_completion: {str(recall_result.get('graph_completion', ''))[:300]}")
 
-        # Step 2: record outcome
+        # Step 2: record outcome — fetches entry via get_session(), calls add_feedback()
         improve_result = await record_outcome("FM-001", "YES")
 
-        assert improve_result["qa_ids_found"] >= 1, "qa_id not found in recall_interactions.json"
+        assert improve_result["qa_ids_found"] >= 1
         assert len(improve_result["feedback_results"]) >= 1
 
         fb = improve_result["feedback_results"][0]
         print(f"\n[improve] add_feedback_returned={fb['add_feedback_returned']}")
-        print(f"[improve] score={fb['score']}")
+        print(f"[improve] score={fb['score']}, reasoning={fb['reasoning']}")
 
-        # add_feedback returns True only if qa_id is in the SQLite cache
         if not fb["add_feedback_returned"]:
             print(
-                "[WARN] add_feedback returned False — qa_id was not found in SQLite cache. "
-                "This happens if the session manager's SQLite DB was wiped since recall ran."
+                "[WARN] add_feedback returned False — qa_id not in SQLite cache. "
+                "This can happen if the session manager's DB was reset since recall ran."
             )
 
-        # apply_feedback_weights result — EXPECT skipped=1 (no graph element IDs)
+        # apply_feedback_weights: EXPECT skipped > 0 (no graph element IDs from GRAPH_COMPLETION)
         apply = improve_result.get("apply_weights_result") or {}
-        print(f"\n[improve] apply_feedback_weights result: {apply}")
+        print(f"\n[improve] apply_feedback_weights: {apply}")
         skipped = apply.get("skipped", 0)
-        assert skipped > 0 or "error" in apply or apply.get("applied", 0) == 0, (
-            "apply_feedback_weights unexpectedly reported applied > 0 with no graph element IDs. "
-            "This would mean edge weights were updated — investigate if really true."
+        applied = apply.get("applied", 0)
+        assert applied == 0 or skipped > 0 or "error" in apply, (
+            "apply_feedback_weights reported applied > 0 with no graph element IDs — "
+            "investigate whether edge weights were actually updated."
         )
         print(
-            "\nHONEST RESULT: apply_feedback_weights skipped (expected). "
-            "Feedback is stored in SQLite but no graph edge weights were modified."
+            "\nHONEST: apply_feedback_weights skipped (expected). "
+            "Feedback stored in SQLite. No graph edge weights modified."
         )
 
     @pytest.mark.asyncio
     async def test_add_feedback_returns_false_after_prune(self):
         """
         After prune_data(), add_feedback returns False for old qa_ids.
-
-        This test demonstrates that feedback is tied to the SQLite cache, which
-        is wiped by prune_data(). Run this test if you want to verify False behavior.
+        Explicitly skipped — would destroy the graph.
         """
         pytest.skip(
-            "Skipping deliberately — would wipe the graph and break other tests. "
-            "To verify False behavior: run prune_data() then try record_outcome()."
+            "Skipping deliberately — would wipe the graph. "
+            "To verify False behavior: run prune_data() then record_outcome()."
         )

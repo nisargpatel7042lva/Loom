@@ -1,38 +1,37 @@
 """
 Self-improvement loop using Cognee's real feedback system.
 
-After a prediction market resolves, this module scores the historical recall
-quality and records feedback via SessionManager.add_feedback(). Cognee then
-runs apply_feedback_weights() to update graph edge weights so future recalls
-surface better-matching precedents.
+After a prediction market resolves, this module:
+  1. Fetches the original recall answer from Cognee's session cache via get_session()
+  2. Scores how well that answer predicted the actual outcome (1–5)
+  3. Records feedback via session_manager.add_feedback()
+  4. Attempts apply_feedback_weights() to update graph edge weights
 
-HONEST DISCLOSURE about what works and what doesn't:
+API CORRECTIONS vs. common documentation errors:
+  cognee.session.add_feedback()     → does NOT exist as a top-level namespace
+  cognee.session.get_session()      → does NOT exist as a top-level namespace
+  save_interaction=True             → does NOT exist in cognee.search()
+  SearchType.FEEDBACK               → does NOT exist in Cognee 1.2.1
 
-  add_feedback()          REAL — stores feedback_score (1–5) and feedback_text
-                          in SQLite. Returns True on success, False if the
-                          qa_id doesn't exist yet.
+The real APIs used here:
+  get_session_manager()             from cognee.infrastructure.session.get_session_manager
+  session_manager.get_session()     returns list[SessionQAEntry] when formatted=False
+  session_manager.add_feedback()    returns True if qa_id found and updated, False otherwise
 
-  apply_feedback_weights() REAL — reads QA entries and tries to update graph
-                           edge weights using EMA:
-                             new_weight = prev + alpha * (normalized - prev)
-                           Maps score 1→0.0, 3→0.5, 5→1.0.
+  GRAPH_COMPLETION searches do NOT auto-save qa_ids — only AGENTIC_COMPLETION does
+  (agentic_retriever.py:452). We call session_manager.add_qa() manually in recall.py
+  and persist the returned qa_id to data/recall_interactions.json.
 
-  THE SKIP CONDITION: apply_feedback_weights._process_feedback_item() returns
-                      {"processed": 0, "applied": 0, "skipped": 1} when
-                      used_graph_element_ids has no node_ids or edge_ids.
-                      GRAPH_COMPLETION does NOT expose which graph nodes/edges
-                      it traversed. Only AGENTIC_COMPLETION (agentic_retriever.py)
-                      populates used_graph_element_ids automatically.
-
-  CONSEQUENCE: With our GRAPH_COMPLETION-based recall, feedback is durably
-               stored in SQLite (add_feedback returns True), but apply_feedback_
-               weights skips weight updates. Recall quality won't improve via
-               the weight mechanism unless used_graph_element_ids is populated.
-               Switching to SearchType.AGENTIC_COMPLETION would fix this.
+WHAT WORKS:
+  add_feedback()       — durably stores score (1-5) in SQLite. Returns True/False.
+  get_session()        — retrieves original answer text for scoring and display.
+  apply_feedback_weights() — IS called, but returns skipped=N because
+                         used_graph_element_ids=None (GRAPH_COMPLETION doesn't expose
+                         which node/edge UUIDs it traversed). No edge weights change.
 
 CLI:
     python -m memory.improve FM-001 YES
-    python -m memory.improve FM-001 YES --score 5 --feedback "Perfect recall"
+    python -m memory.improve FM-001 YES --score 5 --feedback "Correctly recalled cut"
     python -m memory.improve --batch
     python -m memory.improve --compare FM-001
 """
@@ -72,42 +71,74 @@ def _log_entry(entry: dict) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
-def _auto_score(actual_outcome: str, answer_preview: str) -> tuple[int, str]:
+async def _fetch_original_entry(user_id: str, qa_id: str) -> Any | None:
     """
-    Infer feedback_score (1–5) from actual outcome vs recall answer preview.
+    Retrieve the SessionQAEntry for a specific qa_id from Cognee's session cache.
 
-    Returns (score, reasoning).
-      5 = recall signalled the correct direction
-      3 = recall was ambiguous or answer preview was empty
-      1 = recall signalled the wrong direction
+    Calls session_manager.get_session() (the real API; cognee.session.get_session()
+    does not exist) and searches the returned list for the matching qa_id.
 
-    This is a best-effort keyword heuristic — answer_preview is the first 200
-    chars of the GRAPH_COMPLETION result stored in recall_interactions.json at
-    recall time. If the graph was empty, the preview will be empty → score=3.
+    Returns the SessionQAEntry, or None if not found (cache was pruned) or unavailable.
     """
-    preview = answer_preview.lower()
+    try:
+        from cognee.infrastructure.session.get_session_manager import get_session_manager
+        session_manager = get_session_manager()
+        entries = await session_manager.get_session(
+            user_id=user_id,
+            session_id=LOOM_SESSION_ID,
+            formatted=False,
+        )
+        for entry in (entries or []):
+            if str(getattr(entry, "qa_id", "")) == qa_id:
+                return entry
+        return None
+    except Exception:
+        return None
+
+
+def _score_answer_vs_outcome(answer_text: str, actual_outcome: str) -> tuple[int, str]:
+    """
+    Score (1–5) how well the recall answer predicted the actual outcome.
+
+      5 = answer clearly leaned toward the correct outcome direction
+      3 = answer was ambiguous or answer text is empty (graph was empty at recall time)
+      1 = answer clearly leaned toward the WRONG outcome direction
+
+    Uses keyword heuristics on the answer text. This is imperfect — a real scorer
+    would parse the LLM's explicit prediction. But it's deterministic and auditable.
+    """
+    text = answer_text.lower() if answer_text else ""
     outcome = actual_outcome.upper()
 
-    if not preview:
-        return 3, "no answer preview (graph was empty or recall not yet run)"
+    if not text:
+        return 3, "no answer text (graph was empty when this recall was run)"
 
-    yes_signals = sum(1 for w in ("cut", "likely", "high", "will", "yes", "positive", "expect") if w in preview)
-    no_signals  = sum(1 for w in ("pause", "hold", "unlikely", "low", "no", "halt", "won't") if w in preview)
+    yes_signals = sum(1 for w in (
+        "cut", "cuts", "cutting", "reduced", "reduction",
+        "likely", "probable", "high probability", "will", "yes", "positive",
+        "expect", "expected", "anticipat",
+    ) if w in text)
+
+    no_signals = sum(1 for w in (
+        "pause", "paused", "hold", "holding", "halt", "unchanged",
+        "unlikely", "improbable", "low probability", "won't", "no ",
+        "negative", "not expected", "hawkish",
+    ) if w in text)
 
     if outcome == "YES":
         if yes_signals > no_signals:
-            return 5, f"recall leaned YES (yes_signals={yes_signals} > no_signals={no_signals}), outcome YES"
+            return 5, f"answer leaned YES (yes={yes_signals} > no={no_signals}) → correct"
         elif yes_signals == no_signals:
-            return 3, f"recall was ambiguous (signals tied {yes_signals}:{no_signals}), outcome YES"
+            return 3, f"answer was ambiguous (yes={yes_signals} == no={no_signals}), outcome YES"
         else:
-            return 1, f"recall leaned NO (no_signals={no_signals} > yes_signals={yes_signals}), but outcome YES"
+            return 1, f"answer leaned NO (no={no_signals} > yes={yes_signals}) → wrong, outcome YES"
     elif outcome == "NO":
         if no_signals > yes_signals:
-            return 5, f"recall leaned NO (no_signals={no_signals} > yes_signals={yes_signals}), outcome NO"
+            return 5, f"answer leaned NO (no={no_signals} > yes={yes_signals}) → correct"
         elif no_signals == yes_signals:
-            return 3, f"recall was ambiguous (signals tied {no_signals}:{yes_signals}), outcome NO"
+            return 3, f"answer was ambiguous (no={no_signals} == yes={yes_signals}), outcome NO"
         else:
-            return 1, f"recall leaned YES (yes_signals={yes_signals} > no_signals={no_signals}), but outcome NO"
+            return 1, f"answer leaned YES (yes={yes_signals} > no={no_signals}) → wrong, outcome NO"
     else:
         return 3, f"outcome is {actual_outcome!r} (not resolved, neutral score)"
 
@@ -124,16 +155,20 @@ async def record_outcome(
     """
     Record the actual market outcome and attach feedback to historical recall QA entries.
 
+    Steps:
+      1. Load market_id → qa_id mapping from data/recall_interactions.json
+      2. Call get_session() to fetch the original SessionQAEntry (full answer text)
+      3. Score how well the original answer predicted the actual outcome
+      4. Call add_feedback() and report True/False honestly
+      5. Attempt apply_feedback_weights() (will skip — no graph element IDs)
+
     Args:
         market_id:      e.g. "FM-001"
         actual_outcome: "YES", "NO", or "pending"
-        feedback_score: Override auto-computed score (1–5). None = auto-compute from answer preview.
-        feedback_text:  Override feedback text. None = auto-generated.
+        feedback_score: Manual override (1–5). None = auto-scored from answer text.
+        feedback_text:  Manual override. None = auto-generated from scoring reasoning.
 
-    Returns a dict with honest reporting of:
-        - qa_ids_found: how many recall interactions exist for this market
-        - feedback_results: per-qa_id {score, add_feedback_returned: True/False}
-        - apply_weights_result: raw result from apply_feedback_weights (skipped=N is expected)
+    Returns a dict with per-qa_id results including add_feedback_returned (bool).
     """
     from cognee.infrastructure.session.get_session_manager import get_session_manager
     from cognee.modules.users.methods import get_default_user
@@ -144,8 +179,7 @@ async def record_outcome(
     if not market_interactions:
         note = (
             f"No recall interactions found for {market_id!r}. "
-            "Run `python -m memory.recall {market_id}` first (requires populated graph + LLM key). "
-            "Or run `python -m ingest.loader --source fixtures` to populate the graph."
+            "Run `python -m memory.recall {market_id}` with a populated graph first."
         )
         print(f"  [WARN] {note}")
         return {
@@ -165,22 +199,47 @@ async def record_outcome(
 
     for interaction in market_interactions:
         qa_id = interaction["qa_id"]
-        answer_preview = interaction.get("answer_preview", "")
         interaction_session = interaction.get("session_id", LOOM_SESSION_ID)
 
+        # ── Step 1: fetch the original SessionQAEntry ─────────────────────────
+        # get_session() is the real API. cognee.session.get_session() doesn't exist.
+        original_entry = await _fetch_original_entry(user_id, qa_id)
+
+        if original_entry is not None:
+            original_answer = getattr(original_entry, "answer", "") or ""
+            original_question = getattr(original_entry, "question", "")
+            entry_source = "live from session cache"
+        else:
+            # Fallback: use the 200-char preview stored at recall time
+            original_answer = interaction.get("answer_preview", "")
+            original_question = interaction.get("query", "")
+            entry_source = "fallback: 200-char preview (session entry not found — cache may have been pruned)"
+
+        print(f"\n  [{market_id}] qa_id={qa_id[:8]}…")
+        print(f"  Entry source: {entry_source}")
+        if original_answer:
+            preview = original_answer[:200] + ("…" if len(original_answer) > 200 else "")
+            print(f"  Original answer: {preview}")
+        else:
+            print(f"  Original answer: [empty — graph was not populated when recall ran]")
+
+        # ── Step 2: score the recall quality ──────────────────────────────────
         if feedback_score is None:
-            score, reasoning = _auto_score(actual_outcome, answer_preview)
+            score, reasoning = _score_answer_vs_outcome(original_answer, actual_outcome)
         else:
             score = feedback_score
             reasoning = "manually set"
 
         text = feedback_text or (
             f"Market {market_id} resolved as {actual_outcome}. "
-            f"Recall quality assessment: {reasoning}"
+            f"Recall quality: {reasoning}"
         )
 
-        # add_feedback returns True if the qa_id exists in the cache and was updated,
-        # False if the qa_id was not found (e.g. graph was pruned since recall was run).
+        print(f"  Score: {score}/5  ({reasoning})")
+
+        # ── Step 3: call add_feedback() ───────────────────────────────────────
+        # Real API: session_manager.add_feedback() NOT cognee.session.add_feedback()
+        # Returns True if qa_id found in SQLite cache, False if not found or unavailable.
         returned = await session_manager.add_feedback(
             user_id=user_id,
             qa_id=qa_id,
@@ -189,11 +248,18 @@ async def record_outcome(
             session_id=interaction_session,
         )
 
+        if returned:
+            print(f"  add_feedback → True  ✓ (stored in SQLite)")
+        else:
+            print(f"  add_feedback → False ✗ (qa_id not in cache — graph/session was pruned)")
+
         result: dict[str, Any] = {
             "qa_id": qa_id,
             "score": score,
+            "reasoning": reasoning,
             "feedback_text": text,
             "add_feedback_returned": returned,
+            "original_answer_chars": len(original_answer),
         }
         feedback_results.append(result)
 
@@ -204,9 +270,7 @@ async def record_outcome(
             **result,
         })
 
-        status = "True" if returned else "False — qa_id not in cache (graph may have been pruned)"
-        print(f"  [{market_id}] qa_id={qa_id[:8]}… score={score}  add_feedback→{status}")
-
+    # ── Step 4: apply_feedback_weights() ──────────────────────────────────────
     apply_result = await _try_apply_weights(user, feedback_results)
 
     return {
@@ -220,12 +284,15 @@ async def record_outcome(
 
 async def _try_apply_weights(user: Any, feedback_results: list[dict]) -> dict[str, Any]:
     """
-    Attempt to run apply_feedback_weights on the QA entries that got successful add_feedback.
+    Attempt apply_feedback_weights for QA entries with successful add_feedback.
 
-    Returns the raw result dict, which will honestly show skipped=N because
-    used_graph_element_ids is None — GRAPH_COMPLETION does not expose traversed
-    node/edge UUIDs. apply_feedback_weights._process_feedback_item() explicitly
-    returns skipped=1 when both node_ids and edge_ids are empty.
+    HONEST RESULT: returns skipped=N because used_graph_element_ids=None.
+    GRAPH_COMPLETION does not expose traversed node/edge UUIDs.
+    apply_feedback_weights._process_feedback_item() explicitly returns skipped=1
+    when both node_ids and edge_ids are empty (lines 163-170 of apply_feedback_weights.py).
+
+    This call is NOT skipped here — we run it so the mechanism is exercised and the
+    honest skipped count is visible. To get applied>0, switch to AGENTIC_COMPLETION.
     """
     try:
         from cognee.tasks.memify.apply_feedback_weights import apply_feedback_weights
@@ -256,10 +323,9 @@ async def _try_apply_weights(user: Any, feedback_results: list[dict]) -> dict[st
             session_user.reset(token)
 
         result["note"] = (
-            f"skipped={result.get('skipped', '?')} (expected): used_graph_element_ids=None "
-            "because GRAPH_COMPLETION does not expose traversed node/edge UUIDs. "
-            "No graph edge weights were modified. Switch to AGENTIC_COMPLETION "
-            "to get a fully feedback-trainable system."
+            f"skipped={result.get('skipped', '?')} (expected): used_graph_element_ids=None. "
+            "GRAPH_COMPLETION does not surface traversed node/edge UUIDs. "
+            "Switch to AGENTIC_COMPLETION to get applied>0."
         )
         return result
 
@@ -271,12 +337,20 @@ async def _try_apply_weights(user: Any, feedback_results: list[dict]) -> dict[st
 
 async def compare_before_after(market_id: str) -> None:
     """
-    Show the GRAPH_COMPLETION answer before (from stored snapshot) and after
-    (fresh call) for a given market_id.
+    Print the original recall answer (from session cache) vs a fresh call now.
 
-    HONEST NOTE: Without used_graph_element_ids, apply_feedback_weights skips
-    weight updates, so before and after answers are expected to be identical.
-    A real difference would require AGENTIC_COMPLETION-based recall.
+    HONEST NOTE about what to expect:
+      apply_feedback_weights was called but returned skipped=N (no graph element IDs).
+      No graph edge weights were updated. Therefore the GRAPH_COMPLETION answer
+      WILL NOT CHANGE between before and after.
+
+      A real difference would require:
+        1. AGENTIC_COMPLETION (populates used_graph_element_ids automatically)
+        2. apply_feedback_weights to successfully run with those IDs (applied > 0)
+        3. Re-querying after weights propagate
+
+      With GRAPH_COMPLETION, this comparison demonstrates the mechanism is wired up
+      and feedback is stored in SQLite — it does NOT demonstrate weight-based change.
     """
     events = json.loads(DATA_FILE.read_text())
     event = next((e for e in events if e["market_id"] == market_id), None)
@@ -284,48 +358,89 @@ async def compare_before_after(market_id: str) -> None:
         print(f"[ERROR] {market_id!r} not found in fixtures.")
         return
 
+    from cognee.infrastructure.session.get_session_manager import get_session_manager
+    from cognee.modules.users.methods import get_default_user
+
+    user = await get_default_user()
+    user_id = str(user.id)
+
+    # ── BEFORE: fetch from session cache ──────────────────────────────────────
     interactions = _load_interactions()
-    before_preview = None
+    before_answer = None
+    before_score = None
+    before_text = None
+
     if market_id in interactions and interactions[market_id]:
-        before_preview = interactions[market_id][-1].get("answer_preview", "")
+        last = interactions[market_id][-1]
+        qa_id = last["qa_id"]
+        entry = await _fetch_original_entry(user_id, qa_id)
+        if entry is not None:
+            before_answer = getattr(entry, "answer", "") or ""
+            before_score = getattr(entry, "feedback_score", None)
+            before_text = getattr(entry, "feedback_text", None)
+        else:
+            before_answer = last.get("answer_preview", "")
 
     print(f"\n{'='*60}")
-    print(f"BEFORE (snapshot from recall_interactions.json):")
+    print(f"BEFORE — original recall answer (from session cache)")
     print(f"{'='*60}")
-    if before_preview:
-        print(before_preview or "[empty answer]")
+    if before_answer:
+        print(before_answer)
+        if before_score is not None:
+            print(f"\n[feedback already recorded: score={before_score}, text={before_text!r}]")
     else:
-        print("[no prior recall stored — run `python -m memory.recall {market_id}` first]")
+        print("[no session entry found — either graph was empty or session was pruned]")
 
+    # ── AFTER: fresh GRAPH_COMPLETION call ────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"AFTER  (fresh GRAPH_COMPLETION call):")
+    print(f"AFTER  — fresh GRAPH_COMPLETION call now")
     print(f"{'='*60}")
     try:
         result = await find_analogous_events(event)
         graph_answer = result.get("graph_completion")
         if isinstance(graph_answer, list) and graph_answer:
-            print(str(graph_answer[0]))
+            after_text = str(graph_answer[0])
+            print(after_text)
         elif graph_answer:
-            print(str(graph_answer))
+            after_text = str(graph_answer)
+            print(after_text)
         else:
-            print("[GRAPH_COMPLETION returned empty — LLM quota exhausted or graph empty]")
+            after_text = ""
+            print("[GRAPH_COMPLETION returned empty — graph empty or LLM quota exhausted]")
     except Exception as exc:
-        print(f"[ERROR calling find_analogous_events: {exc}]")
+        after_text = ""
+        print(f"[ERROR: {exc}]")
 
-    print()
-    print("INTERPRETATION:")
-    print("  If before == after: expected — weight updates were skipped (no graph element IDs).")
-    print("  A real difference requires AGENTIC_COMPLETION + feedback weight pipeline.")
+    # ── verdict ───────────────────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print("VERDICT")
+    print(f"{'='*60}")
+    if not before_answer and not after_text:
+        print("Both empty — graph not populated. Ingest fixtures first.")
+    elif before_answer == after_text:
+        print("Before == After  (identical)")
+        print("Expected: apply_feedback_weights returned skipped=N — no edge weights changed.")
+        print("To get ranking shifts: switch to AGENTIC_COMPLETION so used_graph_element_ids")
+        print("is populated, then run apply_feedback_weights (it will return applied>0).")
+    else:
+        print("Before != After  (answers differ)")
+        print("This may reflect graph updates from ingest re-runs or LLM non-determinism,")
+        print("NOT from feedback weights (which were skipped — no graph element IDs).")
 
 
 # ── batch mode ────────────────────────────────────────────────────────────────
 
 async def batch_record_outcomes() -> None:
     """
-    Simulate a week of markets resolving: record outcomes for all resolved fixture events.
+    Record outcomes for all resolved fixture events.
 
-    If recall interactions don't exist yet (graph was never populated / recall never run),
-    all events will show qa_ids_found=0 and no feedback will be stored.
+    Simulates a week of markets resolving. For each resolved event:
+      - Fetches the original recall answer from session cache (get_session())
+      - Scores it against the known outcome
+      - Calls add_feedback() and reports True/False honestly
+
+    If no qa_ids exist yet (graph never populated or recall never run),
+    all events will show qa_ids_found=0 and add_feedback won't be called.
     """
     events = json.loads(DATA_FILE.read_text())
     resolved = [e for e in events if e["outcome"] != "pending"]
@@ -333,17 +448,17 @@ async def batch_record_outcomes() -> None:
 
     print(f"\nBatch mode: {len(resolved)} resolved, {len(pending)} pending (skipped)")
     print("="*60)
-    print()
 
-    total_with_qa = 0
+    total_with_qa   = 0
     total_without_qa = 0
-    total_true = 0
+    total_true  = 0
     total_false = 0
+    total_skipped_weights = 0
 
     for event in resolved:
         mid = event["market_id"]
         outcome = event["outcome"]
-        print(f"▶ {mid} ({event['category']}) → {outcome}")
+        print(f"\n▶ {mid} ({event['category']}) → {outcome}")
         result = await record_outcome(mid, outcome)
 
         if result["qa_ids_found"] == 0:
@@ -357,29 +472,33 @@ async def batch_record_outcomes() -> None:
                     total_false += 1
 
         apply = result.get("apply_weights_result") or {}
-        if apply.get("skipped", 0) > 0 or apply.get("error"):
-            print(f"  apply_feedback_weights → {apply}")
-        print()
+        skipped = apply.get("skipped", 0)
+        total_skipped_weights += skipped
+        if skipped > 0 or "error" in apply:
+            print(f"  apply_feedback_weights → {apply.get('note', apply)}")
 
-    print("="*60)
-    print(f"Batch complete:")
-    print(f"  Events processed:           {len(resolved)}")
-    print(f"  Had prior recall (qa_id):   {total_with_qa}")
-    print(f"  No prior recall:            {total_without_qa}")
-    print(f"  add_feedback → True:        {total_true}")
-    print(f"  add_feedback → False:       {total_false}")
-    print(f"  Feedback log:               {_FEEDBACK_LOG}")
-    print()
+    print(f"\n{'='*60}")
+    print("Batch complete:")
+    print(f"  Events processed:                 {len(resolved)}")
+    print(f"  Had prior recall interaction:     {total_with_qa}")
+    print(f"  No prior recall (qa_id absent):   {total_without_qa}")
+    print(f"  add_feedback → True  (stored):    {total_true}")
+    print(f"  add_feedback → False (not found): {total_false}")
+    print(f"  apply_weights skipped:            {total_skipped_weights}")
+    print(f"  Feedback log: {_FEEDBACK_LOG}")
 
     if total_without_qa > 0:
-        print(
-            f"NOTE: {total_without_qa}/{len(resolved)} events had no qa_id. "
-            "To fix:\n"
-            "  1. Get a fresh API key (500+ RPD): https://aistudio.google.com/app/apikey\n"
-            "  2. python -m ingest.loader --source fixtures\n"
-            "  3. for each market: python -m memory.recall <market_id>\n"
-            "  4. python -m memory.improve --batch"
-        )
+        print(f"\nNOTE: {total_without_qa} events had no qa_id. Fix:")
+        print("  1. Get a key with higher RPD: https://aistudio.google.com/app/apikey")
+        print("  2. python -m ingest.loader --source fixtures --limit 5")
+        print("  3. python -m memory.recall <market_id>   (for each market)")
+        print("  4. python -m memory.improve --batch      (then re-run this)")
+
+    if total_true > 0 and total_skipped_weights > 0:
+        print(f"\nFEEDBACK STORED: {total_true} qa_id(s) have feedback in SQLite.")
+        print("EDGE WEIGHTS: unchanged (apply_feedback_weights skipped — no graph element IDs).")
+        print("Run --compare <market_id> to see before/after answers.")
+        print("Expected result: identical (no weight changes occurred).")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -390,23 +509,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Record market outcomes and feed back to Cognee's session manager."
     )
-    subparsers = parser.add_subparsers(dest="cmd")
-
-    # python -m memory.improve FM-001 YES [--score 5] [--feedback "..."]
-    p_single = parser.add_argument_group("single event")
-    parser.add_argument(
-        "market_id",
-        nargs="?",
-        help="Market ID to record outcome for (e.g. FM-001)",
-    )
-    parser.add_argument(
-        "actual_outcome",
-        nargs="?",
-        choices=["YES", "NO", "pending"],
-        help="Actual market resolution",
-    )
+    parser.add_argument("market_id", nargs="?",
+                        help="Market ID to record (e.g. FM-001)")
+    parser.add_argument("actual_outcome", nargs="?",
+                        choices=["YES", "NO", "pending"],
+                        help="Actual market resolution")
     parser.add_argument("--score", type=int, choices=[1, 2, 3, 4, 5],
-                        help="Override auto-computed feedback score (1=bad, 5=perfect)")
+                        help="Override auto-computed score (1=wrong, 5=perfect)")
     parser.add_argument("--feedback", help="Override feedback text")
     parser.add_argument("--batch", action="store_true",
                         help="Record outcomes for all resolved fixture events")
@@ -428,18 +537,20 @@ if __name__ == "__main__":
                 feedback_score=args.score,
                 feedback_text=args.feedback,
             )
-            print()
-            print(f"qa_ids_found:      {result['qa_ids_found']}")
-            print(f"feedback_results:  {len(result['feedback_results'])} entries")
-            print(f"apply_weights:     {result.get('apply_weights_result')}")
+            print(f"\nSummary:")
+            print(f"  qa_ids_found:     {result['qa_ids_found']}")
+            print(f"  feedback_results: {len(result['feedback_results'])} entries")
+            for r in result["feedback_results"]:
+                returned = "True ✓" if r["add_feedback_returned"] else "False ✗"
+                print(f"    qa_id={r['qa_id'][:8]}… score={r['score']}  add_feedback→{returned}")
+            print(f"  apply_weights:    {result.get('apply_weights_result')}")
             if result.get("note"):
-                print(f"note: {result['note']}")
+                print(f"  note: {result['note']}")
         else:
             parser.print_help()
-            print()
-            print("Examples:")
+            print("\nExamples:")
             print("  python -m memory.improve FM-001 YES")
-            print("  python -m memory.improve FM-001 YES --score 5 --feedback 'Perfect recall'")
+            print("  python -m memory.improve FM-001 YES --score 5 --feedback 'Perfect'")
             print("  python -m memory.improve --batch")
             print("  python -m memory.improve --compare FM-001")
             sys.exit(1)
