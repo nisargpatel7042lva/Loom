@@ -181,6 +181,17 @@ if __name__ == "__main__":
             "For fixtures: crypto | macro | elections | sports."
         ),
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Cap the number of events ingested. "
+            "Each event needs ~2-3 LLM calls for graph extraction + summarization. "
+            "Use --limit 2 on a 20-RPD free-tier key to stay within quota."
+        ),
+    )
     args = parser.parse_args()
 
     async def _main() -> None:
@@ -203,6 +214,10 @@ if __name__ == "__main__":
                 f"Loading fixtures (category={args.category or 'all'}): "
                 f"{len(events)} events from {DATA_FILE.name} ..."
             )
+
+        if args.limit is not None and args.limit < len(events):
+            print(f"  → capping to {args.limit} events (--limit {args.limit})")
+            events = events[: args.limit]
 
         summary = await ingest(events)
         print(

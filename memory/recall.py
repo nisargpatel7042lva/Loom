@@ -32,6 +32,7 @@ CLI:
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,8 @@ import cognee
 from cognee.api.v1.search.search import SearchType
 
 from ingest.loader import DATA_FILE, DATASET_NAME
+
+_INTERACTIONS_FILE = Path(__file__).parent.parent / "data" / "recall_interactions.json"
 
 LOOM_SESSION_ID = "loom_live"
 
@@ -113,6 +116,75 @@ async def _safe_search(
         raise
 
 
+def _append_interaction(market_id: str, qa_id: str, answer_preview: str) -> None:
+    """Save a qa_id mapping to data/recall_interactions.json."""
+    interactions: dict = {}
+    if _INTERACTIONS_FILE.exists():
+        try:
+            interactions = json.loads(_INTERACTIONS_FILE.read_text())
+        except Exception:
+            pass
+
+    if market_id not in interactions:
+        interactions[market_id] = []
+
+    interactions[market_id].append({
+        "qa_id": qa_id,
+        "session_id": LOOM_SESSION_ID,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "answer_preview": answer_preview[:200],
+    })
+
+    _INTERACTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _INTERACTIONS_FILE.write_text(json.dumps(interactions, indent=2))
+
+
+async def _save_qa_interaction(
+    market_id: str,
+    query: str,
+    graph_results: list | None,
+) -> str | None:
+    """
+    Manually save a QA entry to Cognee's session manager after a GRAPH_COMPLETION search.
+
+    Returns the qa_id for later feedback attachment, or None if unavailable.
+
+    WHY this exists: cognee.search() with GRAPH_COMPLETION does NOT call session_manager.add_qa()
+    automatically — only AGENTIC_COMPLETION does (agentic_retriever.py:452). Without a qa_id we
+    cannot attach feedback via add_feedback() in memory/improve.py.
+
+    LIMITATION: used_graph_element_ids (node/edge UUIDs that GRAPH_COMPLETION traversed) are not
+    surfaced in the search response. Without them, apply_feedback_weights() will record the feedback
+    in SQLite but return skipped=1 — no graph edge weights are actually updated.
+    Switch to SearchType.AGENTIC_COMPLETION to get a fully feedback-trainable system.
+    """
+    try:
+        from cognee.infrastructure.session.get_session_manager import get_session_manager
+        from cognee.modules.users.methods import get_default_user
+
+        user = await get_default_user()
+        session_manager = get_session_manager()
+
+        answer_text = ""
+        if isinstance(graph_results, list) and graph_results:
+            answer_text = str(graph_results[0])
+
+        qa_id = await session_manager.add_qa(
+            user_id=str(user.id),
+            question=query,
+            context=f"Loom market event recall — {market_id}",
+            answer=answer_text,
+            session_id=LOOM_SESSION_ID,
+        )
+
+        if qa_id:
+            _append_interaction(market_id, qa_id, answer_text)
+
+        return qa_id
+    except Exception:
+        return None
+
+
 async def find_analogous_events(new_event: dict[str, Any]) -> dict[str, Any]:
     """
     Find past market events analogous to new_event using graph-aware retrieval.
@@ -130,6 +202,7 @@ async def find_analogous_events(new_event: dict[str, Any]) -> dict[str, Any]:
             "explanation":        str   — formatted explanation of the analogy
         }
     """
+    market_id = new_event.get("market_id", "unknown")
     query = _build_query(new_event)
 
     # ── primary retrieval: graph traversal + LLM synthesis ───────────────────
@@ -141,6 +214,11 @@ async def find_analogous_events(new_event: dict[str, Any]) -> dict[str, Any]:
     # pipeline doesn't always run it), this returns None.
     triplet_results = await _safe_search(query, SearchType.TRIPLET_COMPLETION, top_k=5)
 
+    # ── save QA entry to session manager for Phase 4 feedback ────────────────
+    # GRAPH_COMPLETION doesn't auto-save qa_ids (only AGENTIC_COMPLETION does).
+    # We call add_qa() manually here so improve.py can attach feedback later.
+    qa_id = await _save_qa_interaction(market_id, query, graph_results)
+
     explanation = _build_explanation(new_event, graph_results, triplet_results)
 
     return {
@@ -149,6 +227,7 @@ async def find_analogous_events(new_event: dict[str, Any]) -> dict[str, Any]:
         "graph_completion": graph_results,
         "triplet_completion": triplet_results,
         "explanation": explanation,
+        "qa_id": qa_id,
     }
 
 
