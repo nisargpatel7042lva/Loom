@@ -17,3 +17,6 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: calls external APIs — skip in CI with -m 'not integration'",
+]
