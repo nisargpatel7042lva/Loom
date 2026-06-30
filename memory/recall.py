@@ -94,25 +94,36 @@ async def _safe_search(
     top_k: int = 10,
 ) -> list | None:
     """
-    Run a single search, returning None (not raising) on index-not-found errors.
-    All other exceptions propagate normally.
+    Run a single search, returning:
+      None  — index not found (cognify hasn't built it yet)
+      []    — graph empty or LLM quota exhausted (treat as no results)
+      list  — actual results
     """
     try:
+        # session_id deliberately NOT passed — avoids prepare_session_turn_for_retrieval
+        # which makes an LLM call per search (retries 3× at 20s with exhausted quota).
         return await cognee.search(
             query_text=query,
             query_type=search_type,
             datasets=[DATASET_NAME],
-            session_id=LOOM_SESSION_ID,
             top_k=top_k,
         )
     except Exception as exc:
         exc_name = type(exc).__name__
         exc_str = str(exc)
-        # Gracefully handle missing vector/triplet index (not built yet in cognify)
+        # Missing vector/triplet index — not built yet in cognify
         if exc_name in _MISSING_INDEX_ERRORS or any(
             m in exc_str for m in _MISSING_INDEX_ERRORS
         ):
             return None
+        # LLM quota exhausted (TRIPLET_COMPLETION calls LLM even with empty context).
+        # Return [] so caller distinguishes quota-empty from index-not-found (None).
+        if (
+            "RateLimitError" in exc_name
+            or "429" in exc_str
+            or "RESOURCE_EXHAUSTED" in exc_str
+        ):
+            return []
         raise
 
 
