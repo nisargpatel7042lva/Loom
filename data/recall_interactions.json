@@ -86,5 +86,13 @@
       "timestamp": "2026-07-01T04:06:19.524846+00:00",
       "answer_preview": "Prediction market POLY-643872 asks: \"Belgium vs. Senegal\". This market belongs to the sports category. The market was opened on 2026-06-28. Current implied probability: 45.0%. The market outcome is cu"
     }
+  ],
+  "SP-003": [
+    {
+      "qa_id": "b84f631b-ad77-4868-95f2-9d8ac700aec6",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T05:16:39.168542+00:00",
+      "answer_preview": "Prediction market SP-002 asks: \"Will Argentina win the 2026 FIFA World Cup?\". This market belongs to the sports category. The market was triggered by 2026 FIFA World Cup group stage results Argentina "
+    }
   ]
 }
