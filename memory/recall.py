@@ -1,32 +1,15 @@
 """
-Recall layer: finds analogous past market events via Cognee's graph-aware retrieval.
+Recall layer: finds analogous past market events via Cognee vector retrieval.
 
-Two retrieval modes are combined per call:
+Uses SearchType.CHUNKS — pure FastEmbed vector similarity search over the text
+stored by cognee.add(). Zero LLM calls. Returns raw text chunks ranked by
+cosine similarity to the query.
 
-  GRAPH_COMPLETION   Full graph traversal + LLM synthesis. Follows entity edges
-                     (e.g. Federal Reserve → FOMC → rate decision) so the answer
-                     reflects actual graph structure, not just embedding proximity.
-                     Requires a working LLM API key.
-
-  TRIPLET_COMPLETION Triplet-level graph retrieval (subject→predicate→object).
-                     No LLM call — purely vector/graph index. Works only if cognify
-                     built the triplet index; silently returns None otherwise.
-
-NOTE — save_interaction=True:
-  This parameter does NOT exist in Cognee 1.2.1. Every search() call is already
-  logged automatically: log_query() writes the query text + type to the 'queries'
-  table in SQLite, log_result() writes the answer to 'results'. session_id groups
-  related queries for later review via get_queries(user_id, limit).
-  For Phase 3 feedback, retrieve the most recent query by session:
-      from cognee.modules.search.operations.get_queries import get_queries
-      from cognee.modules.users.methods import get_default_user
-      user = await get_default_user()
-      recent = await get_queries(user.id, limit=1)
-      query_id = recent[0].id if recent else None
+The LLM synthesis step (1 call) happens in agent/core.py using the chunks
+returned here as grounding context.
 
 CLI:
     python -m memory.recall FM-001
-    python -m memory.recall FM-003 --search-type graph
 """
 
 import asyncio
@@ -44,12 +27,12 @@ import cognee
 from cognee.api.v1.search.search import SearchType
 
 from ingest.loader import DATA_FILE, DATASET_NAME
+from memory.vector_store import search as vs_search, count as vs_count
 
 _INTERACTIONS_FILE = Path(__file__).parent.parent / "data" / "recall_interactions.json"
 
 LOOM_SESSION_ID = "loom_live"
 
-# Error types from LanceDB / Cognee when an index hasn't been built yet
 _MISSING_INDEX_ERRORS = (
     "CollectionNotFoundError",
     "NoDataError",
@@ -58,34 +41,23 @@ _MISSING_INDEX_ERRORS = (
 
 
 def _build_query(event: dict[str, Any]) -> str:
-    """
-    Construct a focused, entity-dense query from the new event's key fields.
-    Emphasis on category + trigger (causal context) + narrative keywords so the
-    graph traversal follows the right entity paths.
-    """
+    """Semantic query for vector similarity search against stored event chunks."""
     parts: list[str] = []
 
-    category = event.get("category", "")
     question = event.get("market_question", "")
+    category = event.get("category", "")
     trigger = event.get("trigger", "")
     narrative = event.get("narrative", "")
 
-    parts.append(f"Find prediction market precedents analogous to: {question}")
-
+    parts.append(question)
     if category:
-        parts.append(f"Category: {category}.")
+        parts.append(f"category: {category}")
     if trigger:
-        parts.append(f"This was triggered by: {trigger}.")
+        parts.append(f"triggered by: {trigger}")
     if narrative:
-        # Truncate long narratives to keep the query tight
-        parts.append(f"Context: {narrative[:300]}")
+        parts.append(narrative[:200])
 
-    parts.append(
-        "What previous markets in the knowledge graph had similar triggers, "
-        "category, or odds movement patterns? Explain the analogy."
-    )
-
-    return " ".join(parts)
+    return " | ".join(parts)
 
 
 async def _safe_search(
@@ -94,14 +66,12 @@ async def _safe_search(
     top_k: int = 10,
 ) -> list | None:
     """
-    Run a single search, returning:
-      None  — index not found (cognify hasn't built it yet)
-      []    — graph empty or LLM quota exhausted (treat as no results)
+    Run a cognee.search() call, returning:
+      None  — index not found (add() hasn't run yet)
+      []    — search returned no results
       list  — actual results
     """
     try:
-        # session_id deliberately NOT passed — avoids prepare_session_turn_for_retrieval
-        # which makes an LLM call per search (retries 3× at 20s with exhausted quota).
         return await cognee.search(
             query_text=query,
             query_type=search_type,
@@ -111,13 +81,10 @@ async def _safe_search(
     except Exception as exc:
         exc_name = type(exc).__name__
         exc_str = str(exc)
-        # Missing vector/triplet index — not built yet in cognify
         if exc_name in _MISSING_INDEX_ERRORS or any(
             m in exc_str for m in _MISSING_INDEX_ERRORS
         ):
             return None
-        # LLM quota exhausted (TRIPLET_COMPLETION calls LLM even with empty context).
-        # Return [] so caller distinguishes quota-empty from index-not-found (None).
         if (
             "RateLimitError" in exc_name
             or "429" in exc_str
@@ -125,6 +92,18 @@ async def _safe_search(
         ):
             return []
         raise
+
+
+def _extract_chunk_text(item: Any) -> str:
+    """Extract plain text from a Cognee search result item."""
+    if hasattr(item, "text") and item.text:
+        return item.text.strip()
+    if isinstance(item, dict):
+        sr = item.get("search_result", [])
+        if sr:
+            return str(sr[0]).strip()
+        return ""   # dict wrapper with empty search_result — no actual text
+    return str(item).strip()
 
 
 def _append_interaction(market_id: str, qa_id: str, answer_preview: str) -> None:
@@ -153,22 +132,9 @@ def _append_interaction(market_id: str, qa_id: str, answer_preview: str) -> None
 async def _save_qa_interaction(
     market_id: str,
     query: str,
-    graph_results: list | None,
+    chunks: list,
 ) -> str | None:
-    """
-    Manually save a QA entry to Cognee's session manager after a GRAPH_COMPLETION search.
-
-    Returns the qa_id for later feedback attachment, or None if unavailable.
-
-    WHY this exists: cognee.search() with GRAPH_COMPLETION does NOT call session_manager.add_qa()
-    automatically — only AGENTIC_COMPLETION does (agentic_retriever.py:452). Without a qa_id we
-    cannot attach feedback via add_feedback() in memory/improve.py.
-
-    LIMITATION: used_graph_element_ids (node/edge UUIDs that GRAPH_COMPLETION traversed) are not
-    surfaced in the search response. Without them, apply_feedback_weights() will record the feedback
-    in SQLite but return skipped=1 — no graph edge weights are actually updated.
-    Switch to SearchType.AGENTIC_COMPLETION to get a fully feedback-trainable system.
-    """
+    """Save a QA entry to Cognee's session manager for later feedback."""
     try:
         from cognee.infrastructure.session.get_session_manager import get_session_manager
         from cognee.modules.users.methods import get_default_user
@@ -177,8 +143,8 @@ async def _save_qa_interaction(
         session_manager = get_session_manager()
 
         answer_text = ""
-        if isinstance(graph_results, list) and graph_results:
-            answer_text = str(graph_results[0])
+        if chunks:
+            answer_text = _extract_chunk_text(chunks[0])
 
         qa_id = await session_manager.add_qa(
             user_id=str(user.id),
@@ -198,117 +164,54 @@ async def _save_qa_interaction(
 
 async def find_analogous_events(new_event: dict[str, Any]) -> dict[str, Any]:
     """
-    Find past market events analogous to new_event using graph-aware retrieval.
+    Find past market events analogous to new_event.
 
-    Args:
-        new_event: A single event dict (fixture schema or Jupiter-mapped schema).
+    Primary path: local FastEmbed cosine similarity search (0 LLM calls, instant).
+    Fallback: cognee.search(CHUNKS) if local store is empty.
 
     Returns:
         {
-            "query":              str   — the query sent to both retrievers
-            "session_id":         str   — session ID for history lookup
-            "graph_completion":   list  — GRAPH_COMPLETION answer (LLM + graph traversal)
-            "triplet_completion": list | None — TRIPLET_COMPLETION answer, None if
-                                               triplet index wasn't built during cognify
-            "explanation":        str   — formatted explanation of the analogy
+            "query":    str         — the semantic query used
+            "chunks":   list[str]   — text of top matching event chunks
+            "qa_id":    str | None  — saved for feedback via improve.py
         }
     """
     market_id = new_event.get("market_id", "unknown")
     query = _build_query(new_event)
 
-    # ── primary retrieval: graph traversal + LLM synthesis ───────────────────
-    graph_results = await _safe_search(query, SearchType.GRAPH_COMPLETION, top_k=10)
+    chunks: list[str] = []
+    raw_results = None
 
-    # ── secondary retrieval: triplet index (no LLM) ──────────────────────────
-    # TRIPLET_COMPLETION requires cognify to have built the triplet embedding
-    # index. If the pipeline didn't include that stage (e.g. the default Cognee
-    # pipeline doesn't always run it), this returns None.
-    triplet_results = await _safe_search(query, SearchType.TRIPLET_COMPLETION, top_k=5)
+    # ── primary: local vector store (FastEmbed, 0 LLM calls) ─────────────────
+    n_stored = vs_count()
+    if n_stored > 0:
+        hits = vs_search(query, top_k=8)
+        for hit in hits:
+            # Skip the event itself (would trivially match)
+            if hit["market_id"] == market_id:
+                continue
+            if hit["score"] > 0.3 and hit["text"]:
+                chunks.append(hit["text"])
 
-    # ── save QA entry to session manager for Phase 4 feedback ────────────────
-    # GRAPH_COMPLETION doesn't auto-save qa_ids (only AGENTIC_COMPLETION does).
-    # We call add_qa() manually here so improve.py can attach feedback later.
-    qa_id = await _save_qa_interaction(market_id, query, graph_results)
+    # ── fallback: cognee CHUNKS search ───────────────────────────────────────
+    if not chunks:
+        raw_results = await _safe_search(query, SearchType.CHUNKS, top_k=8)
+        if raw_results:
+            for item in raw_results:
+                text = _extract_chunk_text(item)
+                if text:
+                    chunks.append(text)
 
-    explanation = _build_explanation(new_event, graph_results, triplet_results)
+    qa_id = await _save_qa_interaction(market_id, query, chunks)
 
     return {
         "query": query,
         "session_id": LOOM_SESSION_ID,
-        "graph_completion": graph_results,
-        "triplet_completion": triplet_results,
-        "explanation": explanation,
+        "chunks": chunks,
+        "raw_results": raw_results,
         "qa_id": qa_id,
+        "n_stored": n_stored,
     }
-
-
-def _build_explanation(
-    new_event: dict[str, Any],
-    graph_results: list | None,
-    triplet_results: list | None,
-) -> str:
-    """
-    Compose a concise explanation of the analogy.
-
-    GRAPH_COMPLETION already produces an LLM-reasoned answer that references
-    specific graph entities and their relationships. We structure it here rather
-    than making a redundant second LLM call. TRIPLET_COMPLETION adds edge-level
-    corroboration when the index exists.
-    """
-    lines: list[str] = []
-    lines.append(
-        f"=== Analogous events for: {new_event.get('market_question', 'unknown')} ==="
-    )
-    lines.append(f"Category: {new_event.get('category', 'n/a')}  |  "
-                 f"Trigger: {new_event.get('trigger', 'n/a')}")
-    lines.append("")
-
-    if graph_results:
-        lines.append("── Graph-traversal answer (GRAPH_COMPLETION) ──")
-        if isinstance(graph_results, list):
-            for item in graph_results:
-                lines.append(str(item))
-        else:
-            lines.append(str(graph_results))
-    else:
-        lines.append("── GRAPH_COMPLETION: no results (graph may be empty or LLM API unavailable)")
-
-    lines.append("")
-
-    if triplet_results is None:
-        lines.append(
-            "── TRIPLET_COMPLETION: index not available "
-            "(triplet embeddings not built by cognify pipeline)"
-        )
-    elif triplet_results:
-        lines.append("── Triplet-level cross-check (TRIPLET_COMPLETION) ──")
-        if isinstance(triplet_results, list):
-            for item in triplet_results[:3]:
-                lines.append(str(item))
-        else:
-            lines.append(str(triplet_results))
-    else:
-        lines.append("── TRIPLET_COMPLETION: returned empty")
-
-    return "\n".join(lines)
-
-
-async def get_last_query_id() -> str | None:
-    """
-    Return the UUID of the most recently logged search query in this process.
-    Useful for Phase 3 feedback attachment.
-    """
-    try:
-        from cognee.modules.search.operations.get_queries import get_queries
-        from cognee.modules.users.methods import get_default_user
-
-        user = await get_default_user()
-        recent = await get_queries(user.id, limit=1)
-        if recent:
-            return str(recent[0].id)
-        return None
-    except Exception:
-        return None
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -330,28 +233,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Find analogous past market events for a given fixture event."
     )
-    parser.add_argument("market_id", help="Market ID from sample_events.json, e.g. FM-003")
-    parser.add_argument(
-        "--search-type",
-        choices=["graph", "triplet", "both"],
-        default="both",
-        help="Which retrieval mode to run (default: both)",
-    )
+    parser.add_argument("market_id", help="Market ID from sample_events.json, e.g. FM-001")
     args = parser.parse_args()
 
     event = _load_fixture_event(args.market_id)
 
     async def _main() -> None:
-        print(f"\nLooking up analogues for {args.market_id}: {event['market_question']!r}")
-        print(f"Dataset: {DATASET_NAME}  |  Session: {LOOM_SESSION_ID}\n")
-
+        print(f"\nRecalling analogues for {args.market_id}: {event['market_question']!r}\n")
         result = await find_analogous_events(event)
 
-        print(result["explanation"])
+        print(f"Query: {result['query'][:120]}…")
+        print(f"Chunks found: {len(result['chunks'])}")
         print()
-
-        query_id = await get_last_query_id()
-        if query_id:
-            print(f"[logged] query_id={query_id}  (attach Phase 3 feedback to this ID)")
+        for i, chunk in enumerate(result["chunks"][:5], 1):
+            print(f"[{i}] {chunk[:200]}")
+            print()
 
     asyncio.run(_main())

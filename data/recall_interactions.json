@@ -5,6 +5,86 @@
       "session_id": "loom_live",
       "timestamp": "2026-06-30T06:29:13.827340+00:00",
       "answer_preview": ""
+    },
+    {
+      "qa_id": "b5c0bda2-00f5-46cb-b14f-743363e93c67",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T02:55:46.284756+00:00",
+      "answer_preview": "{'dataset_id': UUID('38963843-f8f1-59a9-b3d2-83096cf2272f'), 'dataset_name': 'loom_market_events', 'dataset_tenant_id': None, 'search_result': ['No analogous prediction market precedents can be identi"
+    },
+    {
+      "qa_id": "2cea2d74-9533-4e13-bcac-5bbcde0e9c93",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T03:42:10.662219+00:00",
+      "answer_preview": "{'dataset_id': UUID('38963843-f8f1-59a9-b3d2-83096cf2272f'), 'dataset_name': 'loom_market_events', 'dataset_tenant_id': None, 'search_result': []}"
+    },
+    {
+      "qa_id": "459c379c-8acc-4b06-96a6-6e79a3b52a46",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T03:44:19.404617+00:00",
+      "answer_preview": "{'dataset_id': UUID('38963843-f8f1-59a9-b3d2-83096cf2272f'), 'dataset_name': 'loom_market_events', 'dataset_tenant_id': None, 'search_result': []}"
+    },
+    {
+      "qa_id": "d927a1df-e256-44b3-8532-417628bdffc1",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T03:49:52.853138+00:00",
+      "answer_preview": "Prediction market FM-004 asks: \"Will the Federal Reserve cut interest rates at the December 2024 FOMC meeting?\". This market belongs to the macro category. The market was triggered by FOMC Federal Res"
+    },
+    {
+      "qa_id": "01656aa9-9c7b-44eb-b529-dfdb05490bcf",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T03:50:17.629623+00:00",
+      "answer_preview": "Prediction market FM-004 asks: \"Will the Federal Reserve cut interest rates at the December 2024 FOMC meeting?\". This market belongs to the macro category. The market was triggered by FOMC Federal Res"
+    }
+  ],
+  "FM-003": [
+    {
+      "qa_id": "edb91324-f2bf-40b1-825f-7bf874e1be64",
+      "session_id": "loom_live",
+      "timestamp": "2026-06-30T06:57:13.451140+00:00",
+      "answer_preview": ""
+    },
+    {
+      "qa_id": "94b88412-7860-40bb-829d-2a312ff0db29",
+      "session_id": "loom_live",
+      "timestamp": "2026-06-30T06:57:40.468731+00:00",
+      "answer_preview": ""
+    },
+    {
+      "qa_id": "a676bc41-8fad-4bd4-bcf4-de75bd0948cc",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T03:53:17.404153+00:00",
+      "answer_preview": "Prediction market FM-005 asks: \"Will the Federal Reserve cut interest rates at the June 2026 FOMC meeting?\". This market belongs to the macro category. The market was triggered by FOMC Federal Reserve"
+    }
+  ],
+  "EL-001": [
+    {
+      "qa_id": "191517e6-c271-4f24-b464-f4e0f2146f60",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T03:54:37.794381+00:00",
+      "answer_preview": "Prediction market EL-002 asks: \"Will Republicans win a majority in the US Senate in the 2024 elections?\". This market belongs to the elections category. The market was triggered by 2024 US Senate elec"
+    },
+    {
+      "qa_id": "b25baa00-c76b-4c53-9d88-8f5da1dfb86b",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T03:55:17.344373+00:00",
+      "answer_preview": "Prediction market EL-002 asks: \"Will Republicans win a majority in the US Senate in the 2024 elections?\". This market belongs to the elections category. The market was triggered by 2024 US Senate elec"
+    }
+  ],
+  "POLY-643861": [
+    {
+      "qa_id": "9e16dcc3-5164-4861-98cb-88036106b816",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T04:01:50.832328+00:00",
+      "answer_preview": "Prediction market SP-002 asks: \"Will Argentina win the 2026 FIFA World Cup?\". This market belongs to the sports category. The market was triggered by 2026 FIFA World Cup group stage results Argentina "
+    }
+  ],
+  "POLY-643867": [
+    {
+      "qa_id": "ecc5a1a1-e69b-4f59-931c-95122f56e33b",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T04:06:19.524846+00:00",
+      "answer_preview": "Prediction market POLY-643872 asks: \"Belgium vs. Senegal\". This market belongs to the sports category. The market was opened on 2026-06-28. Current implied probability: 45.0%. The market outcome is cu"
     }
   ]
 }

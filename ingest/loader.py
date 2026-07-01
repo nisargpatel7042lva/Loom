@@ -1,9 +1,11 @@
 """
-Ingestion pipeline: loads market events into Cognee as permanent graph memory.
+Ingestion pipeline: loads market events into Cognee vector memory.
 
-Two sources:
-    --source fixtures  (default) reads data/sample_events.json
-    --source live      fetches real events from Jupiter Prediction API
+Uses cognee.add() (not remember/cognify) so ingest requires ZERO LLM calls —
+only local FastEmbed vectorization. This lets us ingest thousands of live Jupiter
+events without touching the daily Gemini API quota.
+
+The LLM is reserved for analysis-time synthesis (exactly 1 call per analyze).
 
 Usage:
     python -m ingest.loader                           # fixtures, all events
@@ -19,22 +21,17 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 import cognee
-from cognee.modules.pipelines.models import PipelineRunStatus
+
+from memory.vector_store import upsert as vs_upsert
 
 DATA_FILE = Path(__file__).parent.parent / "data" / "sample_events.json"
 DATASET_NAME = "loom_market_events"
-
-_TERMINAL = {
-    PipelineRunStatus.DATASET_PROCESSING_COMPLETED,
-    PipelineRunStatus.DATASET_PROCESSING_ERRORED,
-}
 
 # Jupiter category strings → Loom category strings (for fixture filtering)
 _JUPITER_TO_LOOM_CATEGORY = {
@@ -46,11 +43,9 @@ _JUPITER_TO_LOOM_CATEGORY = {
 
 
 def event_to_text(event: dict[str, Any]) -> str:
-    """Render one structured event as entity-dense NL prose for graph extraction.
+    """Render one structured event as entity-dense NL prose for vector embedding.
 
-    Handles None values for fields absent in live (Jupiter) events — trigger,
-    narrative, odds_before, odds_move_pct are not available from the API and
-    are omitted rather than fabricated.
+    Handles None values for fields absent in live (Jupiter) events.
     """
     parts: list[str] = []
 
@@ -92,55 +87,46 @@ def event_to_text(event: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-async def _wait_for_completion(dataset_id: UUID, poll_interval: float = 3.0) -> str:
-    """Poll datasets.get_status() until pipeline reaches a terminal state."""
-    while True:
-        status_map = await cognee.datasets.get_status([dataset_id])
-        status = next(iter(status_map.values()), None)
-        if status in _TERMINAL:
-            return status.value
-        await asyncio.sleep(poll_interval)
-
-
-async def ingest(events: list[dict] | None = None) -> dict[str, Any]:
+async def ingest(
+    events: list[dict] | None = None,
+) -> dict[str, Any]:
     """
-    Ingest market events into permanent Cognee graph memory.
+    Ingest market events into Cognee vector memory using cognee.add() only.
+
+    Zero LLM calls — uses FastEmbed (local) for vectorization. Events are
+    searchable immediately via SearchType.CHUNKS after this call.
 
     Args:
-        events: List of event dicts (fixture or mapped Jupiter). Reads
-                DATA_FILE when None.
+        events: List of event dicts. Reads DATA_FILE when None.
 
     Returns:
-        Dict with events_ingested, dataset_name, dataset_id, status,
-        elapsed_seconds.
+        Dict with events_ingested, dataset_name, status, elapsed_seconds.
     """
     if events is None:
         events = json.loads(DATA_FILE.read_text())
 
-    texts = [event_to_text(e) for e in events]
-
     t0 = time.monotonic()
+    ingested = 0
 
-    result = await cognee.remember(
-        data=texts,
-        dataset_name=DATASET_NAME,
-        # no session_id → permanent graph memory
-    )
+    for i, event in enumerate(events):
+        text = event_to_text(event)
+        mid = event.get("market_id", f"event-{i+1}")
+        print(f"  [{i+1}/{len(events)}] Adding {mid}…", end=" ", flush=True)
 
-    final_status = result.status
-    if result.dataset_id:
         try:
-            final_status = await _wait_for_completion(UUID(result.dataset_id))
-        except Exception:
-            pass
+            await cognee.add(data=[text], dataset_name=DATASET_NAME)
+            vs_upsert(mid, text)   # local FastEmbed vector store (0 LLM calls)
+            ingested += 1
+            print("✓")
+        except Exception as e:
+            print(f"✗ {type(e).__name__}: {str(e)[:60]}")
 
     elapsed = round(time.monotonic() - t0, 2)
 
     return {
-        "events_ingested": len(events),
+        "events_ingested": ingested,
         "dataset_name": DATASET_NAME,
-        "dataset_id": result.dataset_id,
-        "status": final_status,
+        "status": "COMPLETED" if ingested == len(events) else "PARTIAL",
         "elapsed_seconds": elapsed,
     }
 
@@ -186,11 +172,7 @@ if __name__ == "__main__":
         type=int,
         default=None,
         metavar="N",
-        help=(
-            "Cap the number of events ingested. "
-            "Each event needs ~2-3 LLM calls for graph extraction + summarization. "
-            "Use --limit 2 on a 20-RPD free-tier key to stay within quota."
-        ),
+        help="Cap the number of events ingested.",
     )
     args = parser.parse_args()
 
@@ -202,7 +184,6 @@ if __name__ == "__main__":
                 print(
                     "\nWARNING: Jupiter API returned zero events "
                     f"(category={args.category or 'all'}).\n"
-                    "This may mean the API is down, rate-limiting, or the category is empty.\n"
                     "Run with --source fixtures to use the local sample data instead.",
                     file=sys.stderr,
                 )
@@ -222,9 +203,10 @@ if __name__ == "__main__":
         summary = await ingest(events)
         print(
             f"\n✓ {summary['events_ingested']} events ingested"
-            f"\n  dataset_id : {summary['dataset_id']}"
+            f"\n  dataset    : {summary['dataset_name']}"
             f"\n  status     : {summary['status']}"
             f"\n  elapsed    : {summary['elapsed_seconds']}s"
+            f"\n  llm_calls  : 0  (FastEmbed local vectorization only)"
         )
 
     asyncio.run(_main())
