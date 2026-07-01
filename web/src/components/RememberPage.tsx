@@ -5,6 +5,7 @@ import { api, type RememberResult } from '../lib/api'
 import {
   Card, Button, Select, Slider,
   BlurFade, SectionHeader, ErrorBox, Spinner, Badge, toast,
+  WorkflowStepper, StepGuide, NextStepBanner,
 } from './ui'
 
 const LIVE_CATEGORIES = [
@@ -15,7 +16,13 @@ const LIVE_CATEGORIES = [
   { value: 'sports', label: 'Sports' },
 ]
 
-export default function RememberPage({ onMemoryUpdate }: { onMemoryUpdate: () => void }) {
+export default function RememberPage({
+  onMemoryUpdate,
+  onNavigate,
+}: {
+  onMemoryUpdate: () => void
+  onNavigate: (page: string) => void
+}) {
   const [category, setCategory] = useState('')
   const [maxEvents, setMaxEvents] = useState(10)
   const [loading, setLoading] = useState(false)
@@ -56,11 +63,19 @@ export default function RememberPage({ onMemoryUpdate }: { onMemoryUpdate: () =>
 
   return (
     <BlurFade>
+      <WorkflowStepper current="remember" />
+
       <SectionHeader
         title="Remember"
         api="cognee.add()"
         desc="Fetches live Jupiter prediction markets and ingests them into Cognee vector memory using local FastEmbed vectorization. Zero LLM calls."
         llmCalls={0}
+      />
+
+      <StepGuide
+        what="This is step 1 of 4. Choose a category and how many markets to pull, then press 'Remember into Cognee'. Loom fetches live prediction markets from Jupiter and stores them as vector embeddings — no LLM calls, just fast local indexing."
+        prereqs={['Backend running at localhost:8000 (start with uvicorn api.main:app --reload --port 8000)']}
+        next="Once you've ingested some events, go to Recall to search your memory and get an AI-synthesized brief for any market."
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -181,12 +196,11 @@ export default function RememberPage({ onMemoryUpdate }: { onMemoryUpdate: () =>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <CheckCircle size={12} className="text-emerald-400/60" />
-                  <span className="text-white/30 text-xs font-body">
-                    Events are now searchable via cosine similarity — no LLM calls made
-                  </span>
-                </div>
+                <NextStepBanner
+                  message={`${result.events_ingested} events stored. Ready to recall and analyze.`}
+                  label="Go to Recall"
+                  onGo={() => onNavigate('recall')}
+                />
               </motion.div>
             )}
           </AnimatePresence>

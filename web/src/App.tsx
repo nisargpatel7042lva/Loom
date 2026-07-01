@@ -180,12 +180,12 @@ export default function App() {
                 />
               )}
               {page === 'remember' && (
-                <RememberPage onMemoryUpdate={refreshStatus} />
+                <RememberPage onMemoryUpdate={refreshStatus} onNavigate={navigate} />
               )}
               {page === 'recall' && (
-                <RecallPage memoryCount={memoryCount} />
+                <RecallPage memoryCount={memoryCount} onNavigate={navigate} />
               )}
-              {page === 'improve' && <ImprovePage />}
+              {page === 'improve' && <ImprovePage onNavigate={navigate} />}
               {page === 'forget' && <ForgetPage />}
             </motion.div>
           </AnimatePresence>

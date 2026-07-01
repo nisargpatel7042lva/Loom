@@ -30,8 +30,9 @@ import cognee
 
 from memory.vector_store import upsert as vs_upsert
 
-DATA_FILE = Path(__file__).parent.parent / "data" / "sample_events.json"
-DATASET_NAME = "loom_market_events"
+DATA_FILE     = Path(__file__).parent.parent / "data" / "sample_events.json"
+INGESTED_FILE = Path(__file__).parent.parent / "data" / "ingested_events.json"
+DATASET_NAME  = "loom_market_events"
 
 # Jupiter category strings → Loom category strings (for fixture filtering)
 _JUPITER_TO_LOOM_CATEGORY = {
@@ -123,6 +124,9 @@ async def ingest(
 
     elapsed = round(time.monotonic() - t0, 2)
 
+    # Persist ingested events so the UI can list them without re-fetching Jupiter
+    _save_ingested_events(events)
+
     return {
         "events_ingested": ingested,
         "dataset_name": DATASET_NAME,
@@ -131,11 +135,39 @@ async def ingest(
     }
 
 
+def _save_ingested_events(new_events: list[dict]) -> None:
+    """Merge new_events into ingested_events.json (deduplicate by market_id)."""
+    existing: list[dict] = []
+    if INGESTED_FILE.exists():
+        try:
+            existing = json.loads(INGESTED_FILE.read_text())
+        except Exception:
+            existing = []
+    seen = {e["market_id"] for e in existing}
+    to_add = [e for e in new_events if e["market_id"] not in seen]
+    existing.extend(to_add)
+    INGESTED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    INGESTED_FILE.write_text(json.dumps(existing, indent=2))
+
+
+def _load_ingested_events(category: str | None = None) -> list[dict]:
+    """Return events previously ingested via Remember."""
+    if not INGESTED_FILE.exists():
+        return []
+    try:
+        all_events: list[dict] = json.loads(INGESTED_FILE.read_text())
+    except Exception:
+        return []
+    if not category:
+        return all_events
+    loom_cat = _JUPITER_TO_LOOM_CATEGORY.get(category, category)
+    return [e for e in all_events if e.get("category") == loom_cat]
+
+
 def _load_fixture_events(category: str | None) -> list[dict]:
     all_events: list[dict] = json.loads(DATA_FILE.read_text())
     if not category:
         return all_events
-    # Accept either Jupiter category name or Loom category name
     loom_cat = _JUPITER_TO_LOOM_CATEGORY.get(category, category)
     return [e for e in all_events if e.get("category") == loom_cat]
 

@@ -6,6 +6,7 @@
 import { cn } from '../lib/utils'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Info, ChevronDown, ArrowRight } from 'lucide-react'
 
 // ── Card ─────────────────────────────────────────────────────────────────────
 
@@ -554,6 +555,133 @@ export function ApiDot({ online }: { online: boolean }) {
         {online ? 'API online' : 'API offline'}
       </span>
     </span>
+  )
+}
+
+// ── WorkflowStepper ────────────────────────────────────────────────────────────
+
+const WF_STEPS = [
+  { id: 'remember', label: 'Remember', n: 1 },
+  { id: 'recall',   label: 'Recall',   n: 2 },
+  { id: 'improve',  label: 'Improve',  n: 3 },
+  { id: 'forget',   label: 'Forget',   n: 4 },
+] as const
+
+export type WorkflowStep = typeof WF_STEPS[number]['id']
+
+export function WorkflowStepper({ current }: { current: WorkflowStep }) {
+  const currentIdx = WF_STEPS.findIndex((s) => s.id === current)
+  return (
+    <div className="flex items-center mb-5">
+      {WF_STEPS.map((step, i) => {
+        const isActive = step.id === current
+        const isPast   = i < currentIdx
+        return (
+          <div key={step.id} className="flex items-center flex-1 last:flex-none">
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <div className={cn(
+                'w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-mono',
+                isActive ? 'bg-amber-400 text-black' : isPast ? 'bg-white/[0.12] text-white/50' : 'bg-white/[0.04] text-white/20'
+              )}>
+                {step.n}
+              </div>
+              <span className={cn('text-[11px] font-mono hidden sm:inline', isActive ? 'text-amber-400' : isPast ? 'text-white/35' : 'text-white/20')}>
+                {step.label}
+              </span>
+            </div>
+            {i < WF_STEPS.length - 1 && (
+              <div className={cn('flex-1 h-px mx-2 sm:mx-3 min-w-[16px]', i < currentIdx ? 'bg-white/[0.12]' : 'bg-white/[0.05]')} />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── StepGuide ─────────────────────────────────────────────────────────────────
+
+export function StepGuide({
+  what,
+  prereqs,
+  next,
+  okCount = 0,
+}: {
+  what: string
+  prereqs: string[]
+  next: string
+  okCount?: number
+}) {
+  const [open, setOpen] = useState(true)
+  return (
+    <div className="mb-5">
+      <div className="border border-amber-500/15 rounded-2xl bg-amber-500/[0.025]">
+        <button
+          className="w-full flex items-center justify-between px-5 py-3"
+          onClick={() => setOpen((o) => !o)}
+        >
+          <div className="flex items-center gap-2">
+            <Info size={13} className="text-amber-400/60 flex-shrink-0" />
+            <span className="text-amber-400/60 text-[11px] font-mono tracking-wide">How to use this page</span>
+          </div>
+          <ChevronDown size={12} className={cn('text-white/20 transition-transform duration-200', open && 'rotate-180')} />
+        </button>
+        <AnimatePresence initial={false}>
+          {open && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.22 }}
+              className="overflow-hidden"
+            >
+              <div className="px-5 pb-5 border-t border-amber-500/10 space-y-4">
+                <p className="text-white/50 text-sm font-body leading-relaxed pt-4">{what}</p>
+                {prereqs.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-white/20 text-[10px] font-mono tracking-widest uppercase">Before you start</p>
+                    {prereqs.map((p, i) => (
+                      <div key={i} className="flex items-center gap-2.5">
+                        <div className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', i < okCount ? 'bg-emerald-400' : 'bg-amber-400/30')} />
+                        <span className="text-white/40 text-xs font-body">{p}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="flex items-start gap-2 border-t border-white/[0.04] pt-3">
+                  <ArrowRight size={11} className="text-white/20 flex-shrink-0 mt-0.5" />
+                  <span className="text-white/30 text-xs font-body leading-relaxed">{next}</span>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </div>
+  )
+}
+
+// ── NextStepBanner ────────────────────────────────────────────────────────────
+
+export function NextStepBanner({ message, onGo, label }: { message: string; onGo: () => void; label: string }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="border border-emerald-500/20 bg-emerald-500/[0.04] rounded-2xl px-5 py-4 flex items-center justify-between gap-4"
+    >
+      <div className="flex items-center gap-3">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" style={{ animation: 'pulse 2s infinite' }} />
+        <span className="text-white/50 text-sm font-body">{message}</span>
+      </div>
+      <button
+        onClick={onGo}
+        className="flex-shrink-0 flex items-center gap-1.5 text-emerald-400 text-xs font-mono hover:text-emerald-300 transition-colors"
+      >
+        {label}
+        <ArrowRight size={11} />
+      </button>
+    </motion.div>
   )
 }
 

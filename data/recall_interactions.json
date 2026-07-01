@@ -35,6 +35,18 @@
       "session_id": "loom_live",
       "timestamp": "2026-07-01T03:50:17.629623+00:00",
       "answer_preview": "Prediction market FM-004 asks: \"Will the Federal Reserve cut interest rates at the December 2024 FOMC meeting?\". This market belongs to the macro category. The market was triggered by FOMC Federal Res"
+    },
+    {
+      "qa_id": "a448d656-3471-4349-8621-76df1c20d68b",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T05:27:16.202391+00:00",
+      "answer_preview": "Prediction market FM-004 asks: \"Will the Federal Reserve cut interest rates at the December 2024 FOMC meeting?\". This market belongs to the macro category. The market was triggered by FOMC Federal Res"
+    },
+    {
+      "qa_id": "24263106-3ef7-47f8-bd33-08f693269658",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T05:38:58.229932+00:00",
+      "answer_preview": "Prediction market FM-004 asks: \"Will the Federal Reserve cut interest rates at the December 2024 FOMC meeting?\". This market belongs to the macro category. The market was triggered by FOMC Federal Res"
     }
   ],
   "FM-003": [
@@ -93,6 +105,22 @@
       "session_id": "loom_live",
       "timestamp": "2026-07-01T05:16:39.168542+00:00",
       "answer_preview": "Prediction market SP-002 asks: \"Will Argentina win the 2026 FIFA World Cup?\". This market belongs to the sports category. The market was triggered by 2026 FIFA World Cup group stage results Argentina "
+    }
+  ],
+  "MA-001": [
+    {
+      "qa_id": "cbdeb746-c796-4f4c-b434-797de9f29314",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T05:27:24.634015+00:00",
+      "answer_preview": "Prediction market FM-005 asks: \"Will the Federal Reserve cut interest rates at the June 2026 FOMC meeting?\". This market belongs to the macro category. The market was triggered by FOMC Federal Reserve"
+    }
+  ],
+  "CR-002": [
+    {
+      "qa_id": "c0695bb7-41d7-4ce9-87dc-6274a02e8d14",
+      "session_id": "loom_live",
+      "timestamp": "2026-07-01T05:38:30.790988+00:00",
+      "answer_preview": "Prediction market CR-001 asks: \"Will Bitcoin (BTC) reach $100,000 by December 31, 2024?\". This market belongs to the crypto category. The market was triggered by Bitcoin BTC price rally post-election "
     }
   ]
 }

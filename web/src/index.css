@@ -138,3 +138,18 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px;
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+
+/* ── Gradient text ───────────────────────────────────────────────────────── */
+.gradient-text-white {
+  background: linear-gradient(135deg, #ffffff 0%, rgba(255,255,255,0.5) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-amber {
+  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #a78bfa 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}

@@ -89,9 +89,23 @@ async def status():
 
 @app.get("/api/events")
 async def list_events(category: str | None = None, limit: int = 50):
-    """List fixture events. Used to populate market selectors in the UI."""
-    from ingest.loader import _load_fixture_events
-    events = _load_fixture_events(category)
+    """List events previously ingested via Remember. Populates UI market selectors."""
+    from ingest.loader import _load_ingested_events
+    events = _load_ingested_events(category)
+    return {
+        "events": events[:limit],
+        "total": len(events),
+    }
+
+
+@app.get("/api/preview")
+async def preview_events(category: str | None = None, limit: int = 8):
+    """Fetch a live sample from Jupiter without ingesting. Used by the dashboard."""
+    from ingest.loader import _load_live_events
+    try:
+        events = _load_live_events(category)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Jupiter API error: {exc}")
     return {
         "events": events[:limit],
         "total": len(events),

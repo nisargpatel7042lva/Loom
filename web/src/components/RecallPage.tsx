@@ -5,6 +5,7 @@ import { api, type MarketEvent, type AnalyzeResult } from '../lib/api'
 import {
   Card, Button, Select, Input, Badge,
   BlurFade, SectionHeader, ErrorBox, ChunkCard, BriefCard, Spinner, Empty, toast,
+  WorkflowStepper, StepGuide, NextStepBanner,
 } from './ui'
 
 const CATEGORY_OPTIONS = [
@@ -16,7 +17,13 @@ const CATEGORY_OPTIONS = [
 
 type Mode = 'select' | 'custom'
 
-export default function RecallPage({ memoryCount }: { memoryCount: number }) {
+export default function RecallPage({
+  memoryCount,
+  onNavigate,
+}: {
+  memoryCount: number
+  onNavigate: (page: string) => void
+}) {
   const [mode, setMode] = useState<Mode>('select')
   const [events, setEvents] = useState<MarketEvent[]>([])
   const [selectedId, setSelectedId] = useState('')
@@ -64,11 +71,23 @@ export default function RecallPage({ memoryCount }: { memoryCount: number }) {
 
   return (
     <BlurFade>
+      <WorkflowStepper current="recall" />
+
       <SectionHeader
         title="Recall"
         api="cognee.search() + LLM"
         desc="Find analogous past markets via FastEmbed cosine similarity, then synthesize a trader brief with exactly one Gemini LLM call."
         llmCalls={1}
+      />
+
+      <StepGuide
+        what="Step 2 of 4. Pick a market from the list (populated from your ingested events) or type any question. Loom searches your memory for the most similar historical markets and uses one Gemini call to write a concise analyst brief."
+        prereqs={[
+          'Events ingested via Remember (step 1)',
+          'LLM_API_KEY set in .env (for the 1 Gemini synthesis call)',
+        ]}
+        next="After you see a brief, record the actual market outcome on the Improve page to teach Loom how well it recalled."
+        okCount={memoryCount > 0 ? 1 : 0}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -238,6 +257,12 @@ export default function RecallPage({ memoryCount }: { memoryCount: number }) {
                 ) : (
                   <Empty message="No analogous events found. Ingest some events on the Remember page first." />
                 )}
+
+                <NextStepBanner
+                  message="Analysis complete. Record the actual outcome to improve future recall quality."
+                  label="Go to Improve"
+                  onGo={() => onNavigate('improve')}
+                />
               </motion.div>
             )}
           </AnimatePresence>

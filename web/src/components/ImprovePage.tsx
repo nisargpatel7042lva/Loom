@@ -5,6 +5,7 @@ import { api, type MarketEvent, type ImproveResult } from '../lib/api'
 import {
   Card, Button, Select, Badge,
   BlurFade, SectionHeader, ErrorBox, Spinner, Empty, toast,
+  WorkflowStepper, StepGuide, NextStepBanner,
 } from './ui'
 
 const OUTCOME_OPTIONS = [
@@ -27,7 +28,7 @@ const OUTCOME_ICONS = {
   pending: <Clock size={12} className="text-amber-400" />,
 }
 
-export default function ImprovePage() {
+export default function ImprovePage({ onNavigate }: { onNavigate: (page: string) => void }) {
   const [events, setEvents] = useState<MarketEvent[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [outcome, setOutcome] = useState('YES')
@@ -74,11 +75,23 @@ export default function ImprovePage() {
 
   return (
     <BlurFade>
+      <WorkflowStepper current="improve" />
+
       <SectionHeader
         title="Improve"
         api="add_feedback()"
         desc="Record actual market outcomes and score recall quality 1–5. Feedback is stored in Cognee's session cache via session_manager.add_feedback() — zero LLM calls."
         llmCalls={0}
+      />
+
+      <StepGuide
+        what="Step 3 of 4. After a market resolves, come here and set its actual outcome (YES / NO / pending). Loom scores how well the Recall brief matched reality and stores that feedback. Over time this data powers the Forget step to prune bad memories."
+        prereqs={[
+          'Run Recall (step 2) on at least one market so there is a QA entry to score',
+          "Know the market's actual outcome (did it resolve YES or NO?)",
+        ]}
+        next="Once you've scored several markets with low recall quality, head to Forget to prune those stale events from memory."
+        okCount={0}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -274,6 +287,14 @@ export default function ImprovePage() {
                   <Card className="p-6">
                     <Empty message="No prior recall interactions found. Run Recall first so there is a QA entry to score." />
                   </Card>
+                )}
+
+                {result.qa_ids_found > 0 && (
+                  <NextStepBanner
+                    message="Feedback recorded. If recall quality was consistently low, Forget can prune those stale events."
+                    label="Go to Forget"
+                    onGo={() => onNavigate('forget')}
+                  />
                 )}
               </motion.div>
             )}

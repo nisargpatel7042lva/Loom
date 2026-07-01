@@ -5,6 +5,7 @@ import { api, type ForgetResult, type ForgetCandidate } from '../lib/api'
 import {
   Card, Button, Slider, Toggle, Badge,
   BlurFade, SectionHeader, ErrorBox, Spinner, Empty, toast,
+  WorkflowStepper, StepGuide,
 } from './ui'
 
 export default function ForgetPage() {
@@ -38,11 +39,23 @@ export default function ForgetPage() {
 
   return (
     <BlurFade>
+      <WorkflowStepper current="forget" />
+
       <SectionHeader
         title="Forget"
         api="cognee.forget()"
         desc="Detect chronic false-positive precedents and remove them from Cognee's knowledge graph. Events with consistently low recall scores are pruned via cognee.forget(data_id, dataset_id) — zero LLM calls."
         llmCalls={0}
+      />
+
+      <StepGuide
+        what="Step 4 of 4. Loom scans the feedback log for markets that consistently got low recall scores (avg ≤ threshold over N feedbacks). Run in dry-run mode first to preview what would be deleted — then flip the toggle and commit to actually prune those stale events from Cognee memory."
+        prereqs={[
+          'At least 2 Improve feedbacks recorded (step 3)',
+          'At least one market with consistently low recall scores (avg ≤ 2)',
+        ]}
+        next="After pruning, head back to Remember to re-ingest fresh market data and start the cycle again."
+        okCount={0}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

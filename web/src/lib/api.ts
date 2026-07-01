@@ -20,6 +20,11 @@ export const api = {
       `/api/events${category ? `?category=${category}` : ''}`
     ),
 
+  preview: (category?: string, limit = 8) =>
+    request<{ events: MarketEvent[]; total: number }>(
+      `/api/preview?limit=${limit}${category ? `&category=${category}` : ''}`
+    ),
+
   remember: (body: { source?: string; category?: string; max_events: number }) =>
     request<RememberResult>('/api/remember', {
       method: 'POST',
