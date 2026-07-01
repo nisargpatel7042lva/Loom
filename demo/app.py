@@ -20,7 +20,7 @@ load_dotenv(ROOT / ".env")
 import streamlit as st
 
 st.set_page_config(
-    page_title="Loom — Market Memory",
+    page_title="Loom — Prediction Market Memory Agent",
     page_icon="🧵",
     layout="wide",
 )
@@ -49,10 +49,9 @@ def _fetch_live_events(category: str, max_events: int) -> list[dict]:
 
 with st.sidebar:
     st.markdown("## 🧵 Loom")
-    st.caption("Live prediction-market memory agent")
+    st.caption("Prediction Market Memory Agent")
     st.divider()
 
-    # Key status
     llm_key = os.environ.get("LLM_API_KEY", "")
     jup_key = os.environ.get("JUPITER_API_KEY", "")
 
@@ -64,7 +63,7 @@ with st.sidebar:
     if jup_key:
         st.success(f"Jupiter key ✓ `{jup_key[:8]}…`")
     else:
-        st.info("No JUPITER_API_KEY — using public API (50 events/page)")
+        st.info("No JUPITER_API_KEY — using public API")
 
     st.caption(f"Model: `{os.environ.get('LLM_MODEL','—')}`")
 
@@ -74,17 +73,27 @@ with st.sidebar:
         st.metric("Events in memory", n)
     except Exception:
         pass
+
+    st.divider()
+    st.markdown("**Cognee lifecycle**")
+    st.markdown(
+        "🏠 Live Markets\n\n"
+        "🧠 **Remember** — `cognee.add()`\n\n"
+        "🔍 **Recall** — `cognee.search()`\n\n"
+        "✨ **Improve** — `add_feedback()`\n\n"
+        "🗑️ **Forget** — `cognee.prune()`"
+    )
     st.divider()
 
     page = st.radio(
         "Go to",
-        ["🏠 Live Markets", "📥 Ingest", "🔍 Analyze", "📚 Learn", "🗑️ Forget"],
+        ["🏠 Live Markets", "🧠 Remember", "🔍 Recall", "✨ Improve", "🗑️ Forget"],
         label_visibility="collapsed",
     )
 
 # ── LIVE MARKETS ──────────────────────────────────────────────────────────────
 
-if page == "🏠 Live Markets":
+if page == "🏠 Live Markets":  # noqa: E501
     st.title("🏠 Live Prediction Markets")
     st.caption("Data from [Jupiter Prediction API](https://api.jup.ag/prediction/v1) · refreshes every 2 min")
 
@@ -118,19 +127,21 @@ if page == "🏠 Live Markets":
 
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
-        st.caption("💡 Go to **Ingest** to load these into the knowledge graph, then **Analyze** to query them.")
+        st.caption("💡 Go to **Remember** to load these into Cognee memory, then **Recall** to query them.")
 
 
 # ── INGEST ────────────────────────────────────────────────────────────────────
 
-elif page == "📥 Ingest":
-    st.title("📥 Ingest — `cognee.remember()`")
+elif page == "🧠 Remember":
+    st.title("🧠 Remember — `cognee.add()`")
     st.markdown(
         """
-        Loads live Jupiter markets into Cognee's persistent vector memory via `cognee.add()`.
+        Stores live Jupiter prediction markets into Cognee's persistent memory.
 
-        **Zero LLM calls** — uses FastEmbed (local) for vectorization.
-        Ingest is instant and unlimited: no Gemini API quota consumed.
+        **API called:** `cognee.add(data=[event_text], dataset_name="loom_market_events")`
+
+        **Zero LLM calls** — vectorized locally with FastEmbed (`BAAI/bge-small-en-v1.5`).
+        Runs in seconds regardless of volume.
         """
     )
 
@@ -158,22 +169,22 @@ elif page == "📥 Ingest":
     else:
         st.warning("No live events loaded — check Jupiter API connectivity.")
 
-    if st.button("▶ Ingest into Cognee", type="primary", disabled=not events):
+    if st.button("▶ Remember into Cognee", type="primary", disabled=not events):
         llm_key = os.environ.get("LLM_API_KEY", "")
         if not llm_key:
             st.error("Set LLM_API_KEY in .env before ingesting.")
         else:
-            with st.spinner(f"Ingesting {min(limit, len(events))} events via cognee.add()… (FastEmbed, no LLM)"):
+            with st.spinner(f"Calling cognee.add() for {min(limit, len(events))} events… (FastEmbed, no LLM)"):
                 try:
                     from ingest.loader import ingest
                     result = _run(ingest(events[:limit]))
                     st.success(
-                        f"✅ {result['events_ingested']} events ingested  \n"
+                        f"✅ {result['events_ingested']} events stored in Cognee memory  \n"
                         f"Dataset: `{result['dataset_name']}`  \n"
                         f"Status: `{result['status']}`  \n"
-                        f"Time: {result['elapsed_seconds']}s"
+                        f"Time: {result['elapsed_seconds']}s · LLM calls: 0"
                     )
-                    st.info("Now go to **Analyze** to query the graph.")
+                    st.info("Now go to **Recall** to query the graph.")
                 except Exception as e:
                     err = str(e)
                     if "429" in err or "RESOURCE_EXHAUSTED" in err:
@@ -188,16 +199,21 @@ elif page == "📥 Ingest":
 
 # ── ANALYZE ───────────────────────────────────────────────────────────────────
 
-elif page == "🔍 Analyze":
-    st.title("🔍 Analyze — Graph Recall")
+elif page == "🔍 Recall":
+    st.title("🔍 Recall — `cognee.search()`")
     st.markdown(
         """
-        Finds semantically similar past markets via `cognee.search(SearchType.CHUNKS)`,
-        then makes **1 LLM call** to synthesize a trader brief from the retrieved context.
+        Searches Cognee's memory for structurally similar past markets, then synthesizes
+        a brief from the retrieved experience.
+
+        **APIs called:**
+        - `cognee.search(SearchType.CHUNKS, ...)` — semantic similarity over stored events
+        - `session_manager.add_qa(...)` — logs the recall for later feedback
+        - 1 × `litellm.acompletion()` — synthesizes the trader brief from retrieved context
         """
     )
 
-    st.info("Type a market ID (from Ingest) or pick from live markets below.")
+    st.info("Pick a live market or type any market ID from memory.")
 
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -251,17 +267,20 @@ elif page == "🔍 Analyze":
                 result = _run(agent.analyze(selected_event))
 
                 brief = result["brief"]
-                st.subheader("Brief (1 LLM call)")
+                st.subheader("Recall Brief")
                 if "Graph is empty" in brief or "No analogous precedents" in brief:
                     st.warning(brief)
-                    st.info("Run **Ingest** first to populate vector memory.")
+                    st.info("Run **Remember** first to populate Cognee memory.")
                 else:
                     st.success(brief)
 
                 qa_id = result.get("qa_id")
                 if qa_id:
                     st.session_state[f"qa_{selected_event['market_id']}"] = qa_id
-                    st.caption(f"qa_id saved: `{qa_id[:16]}…` — go to **Learn** to record the outcome")
+                    st.caption(
+                        f"`session_manager.add_qa()` → `qa_id={qa_id[:16]}…`  "
+                        f"Go to **Improve** to record the outcome."
+                    )
 
                 chunks = result.get("chunks", [])
                 with st.expander(f"Retrieved memory chunks ({len(chunks)} matches — FastEmbed cosine similarity)"):
@@ -277,14 +296,19 @@ elif page == "🔍 Analyze":
 
 # ── LEARN ─────────────────────────────────────────────────────────────────────
 
-elif page == "📚 Learn":
-    st.title("📚 Learn — `session_manager.add_feedback()`")
+elif page == "✨ Improve":
+    st.title("✨ Improve — `session_manager.add_feedback()`")
     st.markdown(
         """
-        Record the actual market outcome. Loom fetches the original recall answer from
-        Cognee's session cache, scores it 1–5, and stores feedback via
-        `session_manager.add_feedback()`. Returns **True** if the qa_id was found,
-        **False** otherwise — reported honestly.
+        Record the actual market outcome and teach Loom from its own experience.
+
+        **APIs called:**
+        - `session_manager.get_session(user_id, session_id)` — retrieves the original recall answer
+        - Auto-scores it 1–5 vs actual outcome
+        - `session_manager.add_feedback(user_id, qa_id, text, score, session_id)` → `True/False`
+
+        This closes the loop: every recall gets graded, building a feedback record
+        Cognee can use to weight future retrievals.
         """
     )
 
@@ -316,7 +340,7 @@ elif page == "📚 Learn":
                 if n == 0:
                     st.warning(
                         f"No recall interactions found for `{market_id}`. "
-                        "Run **Analyze** on this market first."
+                        "Run **Recall** on this market first."
                     )
                 else:
                     st.success(f"Feedback stored for {n} recall interaction(s).")
@@ -339,16 +363,18 @@ elif page == "📚 Learn":
 # ── FORGET ────────────────────────────────────────────────────────────────────
 
 elif page == "🗑️ Forget":
-    st.title("🗑️ Forget — `cognee.forget()` pruning")
+    st.title("🗑️ Forget — `cognee.prune()`")
     st.markdown(
         """
-        Identifies markets that were repeatedly recalled as analogies but consistently
-        scored ≤ threshold — chronic false positives — and removes them from the graph.
+        Identifies markets that were repeatedly recalled but consistently scored ≤ threshold
+        — chronic false positives — and removes them from Cognee's memory.
 
-        **Deletion semantics (from Cognee source):**
-        - ✅ SQLite Data record removed
-        - ✅ Unique graph nodes/edges removed
-        - ⚠️ Shared entity nodes (e.g. "Federal Reserve") — *detagged only*, graph stays coherent
+        **APIs called:**
+        - `find_stale_candidates()` — reads feedback scores from SQLite session cache
+        - `cognee.prune(datasets=[...], data_ids=[...])` — removes data + deregisters vector entries
+
+        **Why this matters:** without forgetting, bad analogies compound. A market that
+        looked like a Fed cut but wasn't keeps getting recalled. Pruning keeps memory clean.
         """
     )
 

@@ -1,6 +1,6 @@
-# Loom — Prediction-Market Memory Agent
+# Loom — Prediction Market Memory Agent
 
-> A Cognee-native agent that remembers past market resolutions, finds structural analogies when a new market opens, learns from every wrong prediction, and prunes false-positive precedents from its own graph.
+> An experience engine for prediction markets. Loom uses Cognee's full memory lifecycle — remember, recall, improve, forget — to surface structural analogies from historical outcomes the moment a new market opens.
 
 Built for the [Cognee Hackathon](https://cognee.ai). Fully self-hosted — no Cognee Cloud, no external vector services.
 
